@@ -1,3 +1,5 @@
+export const dynamic = 'force-dynamic'
+
 import { NextResponse } from 'next/server'
 import { checkCalendarConnection } from '@/lib/googleCalendar'
 import { createAdminClient } from '@/lib/supabase'

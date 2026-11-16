@@ -22,7 +22,7 @@ export function StatusBar() {
   const fetchStatus = async () => {
     setLoading(true)
     try {
-      const serverUrl = process.env.NEXT_PUBLIC_SERVER_URL || 'http://localhost:3001'
+      const serverUrl = process.env.NEXT_PUBLIC_BACKEND_URL || process.env.NEXT_PUBLIC_SERVER_URL || 'http://localhost:3001'
       const res = await fetch(`${serverUrl}/api/status`).catch(() => null)
       if (res && res.ok) {
         const data = await res.json()

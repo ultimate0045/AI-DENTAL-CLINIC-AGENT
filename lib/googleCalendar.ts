@@ -23,9 +23,14 @@ export interface BookCalendarParams {
 }
 
 export function getCalendarAuthClient(serviceAccountJson?: string) {
-  if (serviceAccountJson && serviceAccountJson.trim()) {
+  const jsonToUse =
+    serviceAccountJson ||
+    process.env.GOOGLE_SERVICE_ACCOUNT_JSON ||
+    process.env.GOOGLE_CREDENTIALS_JSON
+
+  if (jsonToUse && jsonToUse.trim()) {
     try {
-      const parsed = typeof serviceAccountJson === 'string' ? JSON.parse(serviceAccountJson) : serviceAccountJson
+      const parsed = typeof jsonToUse === 'string' ? JSON.parse(jsonToUse) : jsonToUse
       if (parsed.client_email && (parsed.private_key || parsed.privateKey)) {
         return new google.auth.GoogleAuth({
           credentials: {

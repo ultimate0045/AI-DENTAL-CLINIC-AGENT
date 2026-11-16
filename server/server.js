@@ -32,8 +32,29 @@ dotenv.config({ path: join(__dirname, '../.env.local') });
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3001;
-const CLIENT_URL = process.env.NEXT_PUBLIC_CLIENT_URL || 'http://localhost:3000';
+const FRONTEND_URL = process.env.FRONTEND_URL || process.env.NEXT_PUBLIC_CLIENT_URL || 'http://localhost:3000';
 const META_GRAPH_URL = 'https://graph.facebook.com/v19.0';
+
+// ─── Dynamic CORS Configuration for Vercel & Cloud Deployments ───────────────
+const allowedOrigins = [
+  process.env.FRONTEND_URL,
+  process.env.NEXT_PUBLIC_CLIENT_URL,
+  process.env.CLIENT_URL,
+  'http://localhost:3000',
+  'http://localhost:3001',
+].filter(Boolean);
+
+const isOriginAllowed = (origin) => {
+  if (!origin) return true; // allow non-browser requests (Meta webhooks, curl, Postman, health checks)
+  if (process.env.FRONTEND_URL === '*' || process.env.CORS_ORIGIN === '*') return true;
+  if (allowedOrigins.includes(origin)) return true;
+  try {
+    const hostname = new URL(origin).hostname;
+    if (hostname.endsWith('.vercel.app')) return true; // Allow any Vercel deployment preview or production domain
+    if (hostname === 'localhost' || hostname === '127.0.0.1') return true;
+  } catch {}
+  return true; // Permissive fallback for socket.io & CORS in production
+};
 
 // ─── Supabase Client (service role) ──────────────────────────────────────────
 const supabase = createClient(
@@ -47,7 +68,9 @@ const app = express();
 const httpServer = createServer(app);
 const io = new SocketIOServer(httpServer, {
   cors: {
-    origin: CLIENT_URL,
+    origin: (origin, callback) => {
+      callback(null, true);
+    },
     methods: ['GET', 'POST'],
     credentials: true,
   },
@@ -57,7 +80,14 @@ const io = new SocketIOServer(httpServer, {
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', CLIENT_URL);
+  const origin = req.headers.origin;
+  if (origin && isOriginAllowed(origin)) {
+    res.header('Access-Control-Allow-Origin', origin);
+  } else if (process.env.FRONTEND_URL && process.env.FRONTEND_URL !== '*') {
+    res.header('Access-Control-Allow-Origin', process.env.FRONTEND_URL);
+  } else {
+    res.header('Access-Control-Allow-Origin', '*');
+  }
   res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
   res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
   res.header('Access-Control-Allow-Credentials', 'true');
@@ -73,6 +103,31 @@ const upload = multer({
 
 // ─── Helper: Google Auth Client ───────────────────────────────────────────────
 function getGoogleAuthClient() {
+  // 1. Check for entire JSON in environment variables (Render / Vercel cloud environments)
+  const envJson = process.env.GOOGLE_SERVICE_ACCOUNT_JSON || process.env.GOOGLE_CREDENTIALS_JSON;
+  if (envJson && envJson.trim()) {
+    try {
+      const parsed = typeof envJson === 'string' ? JSON.parse(envJson) : envJson;
+      if (parsed.client_email && (parsed.private_key || parsed.privateKey)) {
+        let rawKey = parsed.private_key || parsed.privateKey || '';
+        if ((rawKey.startsWith('"') && rawKey.endsWith('"')) || (rawKey.startsWith("'") && rawKey.endsWith("'"))) {
+          rawKey = rawKey.slice(1, -1);
+        }
+        const privateKey = rawKey.replace(/\\n/g, '\n').replace(/\r\n/g, '\n').trim();
+        return new google.auth.GoogleAuth({
+          credentials: { client_email: parsed.client_email, private_key: privateKey },
+          scopes: [
+            'https://www.googleapis.com/auth/calendar',
+            'https://www.googleapis.com/auth/spreadsheets',
+          ],
+        });
+      }
+    } catch (e) {
+      console.warn('[getGoogleAuthClient] Error parsing GOOGLE_SERVICE_ACCOUNT_JSON from env:', e.message);
+    }
+  }
+
+  // 2. Check local file (dev environment)
   const jsonPathParent = join(__dirname, '../service-account.json');
   const jsonPathLocal = join(__dirname, 'service-account.json');
   const jsonFile = fs.existsSync(jsonPathParent) ? jsonPathParent : (fs.existsSync(jsonPathLocal) ? jsonPathLocal : null);
@@ -87,6 +142,7 @@ function getGoogleAuthClient() {
     });
   }
 
+  // 3. Check individual env variables
   const email = process.env.GOOGLE_CLIENT_EMAIL || process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
   let rawKey = process.env.GOOGLE_PRIVATE_KEY || '';
   if ((rawKey.startsWith('"') && rawKey.endsWith('"')) || (rawKey.startsWith("'") && rawKey.endsWith("'"))) {
@@ -2803,17 +2859,23 @@ app.post('/api/upload-kb', upload.single('file'), async (req, res) => {
   }
 });
 
-// Health check
-app.get('/health', (req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+// Health check routes for Render, Vercel & Uptime Monitors
+app.get(['/health', '/api/health', '/'], (req, res) => {
+  res.json({
+    status: 'ok',
+    service: 'whatsapp-dental-ai-backend',
+    uptime: Math.floor(process.uptime()),
+    timestamp: new Date().toISOString(),
+  });
 });
 
 // ─── Start Server ──────────────────────────────────────────────────────────────
-httpServer.listen(PORT, () => {
+httpServer.listen(PORT, '0.0.0.0', () => {
   console.log(`\n🦷 WhatsApp AI Dental Receptionist Server`);
-  console.log(`   Server running on port ${PORT}`);
-  console.log(`   Webhook URL: http://localhost:${PORT}/webhook`);
-  console.log(`   Frontend:    ${CLIENT_URL}\n`);
+  console.log(`   Server running on 0.0.0.0:${PORT}`);
+  console.log(`   Health check: http://0.0.0.0:${PORT}/health`);
+  console.log(`   Webhook URL:  http://0.0.0.0:${PORT}/webhook`);
+  console.log(`   Frontend:     ${FRONTEND_URL}\n`);
 });
 
 export default app;

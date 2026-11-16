@@ -121,6 +121,7 @@ export async function getDynamicCredentials(forceFresh = false): Promise<Dynamic
     settingsRow?.google_service_account_json ||
     kbMetadata?.google_service_account_json ||
     process.env.GOOGLE_SERVICE_ACCOUNT_JSON ||
+    process.env.GOOGLE_CREDENTIALS_JSON ||
     ''
 
   const geminiApiKey =

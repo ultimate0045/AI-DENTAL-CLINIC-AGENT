@@ -9,7 +9,7 @@ export function getSocket(): Socket {
   }
 
   if (!socketInstance) {
-    const serverUrl = process.env.NEXT_PUBLIC_SERVER_URL || 'http://localhost:3001'
+    const serverUrl = process.env.NEXT_PUBLIC_BACKEND_URL || process.env.NEXT_PUBLIC_SERVER_URL || 'http://localhost:3001'
     socketInstance = io(serverUrl, {
       autoConnect: true,
       reconnection: true,

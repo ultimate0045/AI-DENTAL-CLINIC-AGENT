@@ -239,7 +239,7 @@ export async function POST(request: Request) {
     invalidateCredentialsCache()
 
     // 7. Notify backend Express server (port 3001) to invalidate its cache immediately
-    const serverUrl = process.env.NEXT_PUBLIC_SERVER_URL || 'http://localhost:3001'
+    const serverUrl = process.env.NEXT_PUBLIC_BACKEND_URL || process.env.NEXT_PUBLIC_SERVER_URL || 'http://localhost:3001'
     try {
       await fetch(`${serverUrl}/api/settings/invalidate-cache`, { method: 'POST' })
     } catch {}

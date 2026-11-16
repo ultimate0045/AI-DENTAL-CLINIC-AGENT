@@ -94,7 +94,7 @@ export function useSocket(
       if (!content.trim() || !conversationId) return false
 
       try {
-        const serverUrl = process.env.NEXT_PUBLIC_SERVER_URL || 'http://localhost:3001'
+        const serverUrl = process.env.NEXT_PUBLIC_BACKEND_URL || process.env.NEXT_PUBLIC_SERVER_URL || 'http://localhost:3001'
         const res = await fetch(`${serverUrl}/api/send-message`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -141,7 +141,7 @@ export function useSocket(
       }
 
       // Also call server API
-      const serverUrl = process.env.NEXT_PUBLIC_SERVER_URL || 'http://localhost:3001'
+      const serverUrl = process.env.NEXT_PUBLIC_BACKEND_URL || process.env.NEXT_PUBLIC_SERVER_URL || 'http://localhost:3001'
       fetch(`${serverUrl}/api/conversations/${conversationId}/toggle-ai`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
