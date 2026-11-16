@@ -259,3 +259,31 @@ export async function bookCalendarAppointment(
     }
   }
 }
+
+/**
+ * Delete / cancel an appointment event in Google Calendar
+ */
+export async function deleteCalendarEvent(
+  eventId: string,
+  calendarId?: string,
+  date?: string
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    const id = resolveCalendarId(calendarId)
+    if (!id || !eventId) {
+      return { success: false, error: 'Calendar ID or Event ID missing' }
+    }
+    const calendar = getCalendarClient()
+    await calendar.events.delete({
+      calendarId: id,
+      eventId: eventId,
+    })
+    if (date) {
+      invalidateGoogleCalendarCache(date)
+    }
+    return { success: true }
+  } catch (err: any) {
+    console.warn('[Calendar Warning] Failed to delete event:', err?.message)
+    return { success: false, error: err?.message || 'Failed to delete event' }
+  }
+}

@@ -43,6 +43,15 @@ export default function DashboardPage() {
         }
       })
       .catch(() => {})
+
+    fetch('/api/appointments?countOnly=true&status=Confirmed')
+      .then((res) => res.json())
+      .then((data) => {
+        if (data?.success && typeof data.count === 'number') {
+          setStats((prev) => ({ ...prev, appointmentsCount: data.count }))
+        }
+      })
+      .catch(() => {})
   }, [])
 
   return (
@@ -86,21 +95,25 @@ export default function DashboardPage() {
             </CardContent>
           </Card>
 
-          {/* Card 2: Google Calendar */}
-          <Card className="bg-card/70 border-border/60 shadow-sm hover:shadow transition-shadow">
-            <CardHeader className="p-3.5 pb-2">
-              <div className="flex items-center justify-between">
-                <CardTitle className="text-xs font-semibold flex items-center gap-1.5">
-                  <Calendar className="w-4 h-4 text-emerald-500" />
-                  Google Calendar
-                </CardTitle>
-                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500" />
-              </div>
-            </CardHeader>
-            <CardContent className="p-3.5 pt-0 text-[11px] text-muted-foreground">
-              Real-time slot checking & automated appointment booking via Gemini function calling.
-            </CardContent>
-          </Card>
+          {/* Card 2: Confirmed Appointments */}
+          <Link href="/dashboard/appointments" className="block text-left">
+            <Card className="bg-card/70 border-border/60 shadow-sm hover:shadow transition-all hover:border-emerald-500/50 cursor-pointer h-full">
+              <CardHeader className="p-3.5 pb-2">
+                <div className="flex items-center justify-between">
+                  <CardTitle className="text-xs font-semibold flex items-center gap-1.5">
+                    <Calendar className="w-4 h-4 text-emerald-500" />
+                    Appointments
+                  </CardTitle>
+                  <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-emerald-500/15 text-emerald-700 dark:text-emerald-300">
+                    {stats.appointmentsCount} Confirmed
+                  </span>
+                </div>
+              </CardHeader>
+              <CardContent className="p-3.5 pt-0 text-[11px] text-muted-foreground">
+                {stats.appointmentsCount} active booking{stats.appointmentsCount === 1 ? '' : 's'} scheduled in Google Calendar & Supabase.
+              </CardContent>
+            </Card>
+          </Link>
 
           {/* Card 3: Google Sheets Primary Store */}
           <Card className="bg-card/70 border-border/60 shadow-sm hover:shadow transition-shadow">
@@ -121,19 +134,27 @@ export default function DashboardPage() {
 
         {/* Quick Action Buttons */}
         <div className="flex flex-wrap items-center justify-center gap-3 pt-2">
+          <Link href="/dashboard/appointments">
+            <Button className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs gap-1.5 shadow-sm">
+              <Calendar className="w-3.5 h-3.5" />
+              View Appointments ({stats.appointmentsCount})
+              <ArrowRight className="w-3.5 h-3.5 ml-0.5" />
+            </Button>
+          </Link>
+
           <Button
             onClick={() => setIsSimulateOpen(true)}
-            className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs gap-1.5 shadow-sm"
+            variant="outline"
+            className="text-xs gap-1.5 border-border shadow-sm"
           >
-            <Sparkles className="w-3.5 h-3.5" />
+            <Sparkles className="w-3.5 h-3.5 text-emerald-500" />
             Simulate Patient Message
           </Button>
 
           <Link href="/dashboard/settings">
             <Button variant="outline" className="text-xs gap-1.5 border-border shadow-sm">
               <Settings className="w-3.5 h-3.5" />
-              Configure Clinic Settings & Sheet
-              <ArrowRight className="w-3.5 h-3.5 ml-1" />
+              Configure Settings & Sheet
             </Button>
           </Link>
         </div>

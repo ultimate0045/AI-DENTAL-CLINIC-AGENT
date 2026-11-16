@@ -15,6 +15,7 @@ import {
   Sparkles,
   Stethoscope,
   ChevronRight,
+  Calendar,
 } from 'lucide-react'
 import { useTheme } from '@/hooks/useTheme'
 import { getInitials, formatRelativeTime, formatPhone, truncateText } from '@/lib/utils'
@@ -49,6 +50,25 @@ export default function Sidebar({
   const [searchQuery, setSearchQuery] = useState('')
   const [loading, setLoading] = useState(false)
   const [isSimulateOpen, setIsSimulateOpen] = useState(false)
+  const [appointmentsCount, setAppointmentsCount] = useState<number>(0)
+
+  const loadAppointmentsCount = async () => {
+    try {
+      const res = await fetch('/api/appointments?countOnly=true&status=Confirmed')
+      if (res.ok) {
+        const data = await res.json()
+        if (typeof data.count === 'number') {
+          setAppointmentsCount(data.count)
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  useEffect(() => {
+    loadAppointmentsCount()
+  }, [pathname])
 
   const loadConversations = async () => {
     setLoading(true)
@@ -109,6 +129,17 @@ export default function Sidebar({
         </div>
 
         <div className="flex items-center gap-1">
+          {/* Appointments link */}
+          <Link
+            href="/dashboard/appointments"
+            title="Appointments Management"
+            className={`p-2 rounded-full hover:bg-muted transition-colors ${
+              pathname === '/dashboard/appointments' ? 'text-emerald-500 bg-emerald-500/10' : 'text-muted-foreground'
+            }`}
+          >
+            <Calendar className="w-4 h-4" />
+          </Link>
+
           {/* Settings link */}
           <Link
             href="/dashboard/settings"
@@ -128,6 +159,44 @@ export default function Sidebar({
           >
             {isDark ? <Sun className="w-4 h-4 text-amber-400" /> : <Moon className="w-4 h-4 text-slate-700" />}
           </button>
+        </div>
+      </div>
+
+      {/* Primary Navigation Segment: Chats vs Appointments */}
+      <div className="px-3 pt-3 pb-1 border-b border-border/40">
+        <div className="grid grid-cols-2 gap-1.5 p-1 bg-muted/60 rounded-xl text-xs font-semibold">
+          <Link
+            href="/dashboard"
+            className={`flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-lg transition-all ${
+              pathname !== '/dashboard/appointments' && pathname !== '/dashboard/settings'
+                ? 'bg-background text-foreground shadow-sm'
+                : 'text-muted-foreground hover:text-foreground'
+            }`}
+          >
+            <MessageSquare className="w-3.5 h-3.5 text-emerald-500" />
+            <span>Chats</span>
+            {conversations.length > 0 && (
+              <span className="text-[10px] px-1.5 py-0.2 bg-muted rounded-full font-medium">
+                {conversations.length}
+              </span>
+            )}
+          </Link>
+          <Link
+            href="/dashboard/appointments"
+            className={`flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-lg transition-all ${
+              pathname === '/dashboard/appointments'
+                ? 'bg-background text-emerald-600 dark:text-emerald-400 shadow-sm'
+                : 'text-muted-foreground hover:text-foreground'
+            }`}
+          >
+            <Calendar className="w-3.5 h-3.5 text-emerald-500" />
+            <span>Appointments</span>
+            {appointmentsCount > 0 && (
+              <span className="text-[10px] px-1.5 py-0.2 bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 rounded-full font-semibold">
+                {appointmentsCount}
+              </span>
+            )}
+          </Link>
         </div>
       </div>
 
