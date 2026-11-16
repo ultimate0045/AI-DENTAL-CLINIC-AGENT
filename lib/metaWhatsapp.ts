@@ -1,4 +1,5 @@
 import axios from 'axios'
+import { getDynamicCredentials } from './credentials'
 
 const META_GRAPH_VERSION = 'v19.0'
 const META_BASE_URL = `https://graph.facebook.com/${META_GRAPH_VERSION}`
@@ -9,22 +10,37 @@ export interface MetaSendResult {
   error?: string
 }
 
-function getMetaCredentials() {
-  const token = process.env.WHATSAPP_ACCESS_TOKEN || process.env.META_ACCESS_TOKEN || process.env.META_WHATSAPP_TOKEN
-  const phoneId = process.env.META_PHONE_NUMBER_ID || process.env.WHATSAPP_PHONE_NUMBER_ID
-  return { token, phoneId }
+async function getMetaCredentials(override?: { token?: string; phoneId?: string }) {
+  if (override?.token && override?.phoneId) {
+    return { token: override.token, phoneId: override.phoneId }
+  }
+  try {
+    const creds = await getDynamicCredentials()
+    return {
+      token: override?.token || creds.metaAccessToken,
+      phoneId: override?.phoneId || creds.metaPhoneNumberId,
+    }
+  } catch {
+    const token = override?.token || process.env.WHATSAPP_ACCESS_TOKEN || process.env.META_ACCESS_TOKEN || process.env.META_WHATSAPP_TOKEN || ''
+    const phoneId = override?.phoneId || process.env.META_PHONE_NUMBER_ID || process.env.WHATSAPP_PHONE_NUMBER_ID || ''
+    return { token, phoneId }
+  }
 }
 
 /**
  * Send text message through Meta WhatsApp Cloud API
  */
-export async function sendTextMessage(to: string, text: string): Promise<MetaSendResult> {
-  const { token, phoneId } = getMetaCredentials()
+export async function sendTextMessage(
+  to: string,
+  text: string,
+  override?: { token?: string; phoneId?: string }
+): Promise<MetaSendResult> {
+  const { token, phoneId } = await getMetaCredentials(override)
 
   if (!token || !phoneId) {
     return {
       success: false,
-      error: 'WHATSAPP_ACCESS_TOKEN or META_PHONE_NUMBER_ID is missing in environment variables',
+      error: 'WhatsApp Access Token or Phone Number ID is missing in Settings or environment variables',
     }
   }
 
@@ -76,7 +92,7 @@ export async function sendMediaMessage(
   mediaUrl: string,
   caption?: string
 ): Promise<MetaSendResult> {
-  const { token, phoneId } = getMetaCredentials()
+  const { token, phoneId } = await getMetaCredentials()
 
   if (!token || !phoneId) {
     return { success: false, error: 'Meta WhatsApp credentials missing' }
@@ -122,7 +138,7 @@ export async function sendMediaMessage(
  * Mark an incoming WhatsApp message as read
  */
 export async function markMessageAsRead(messageId: string): Promise<boolean> {
-  const { token, phoneId } = getMetaCredentials()
+  const { token, phoneId } = await getMetaCredentials()
   if (!token || !phoneId || !messageId) return false
 
   try {
@@ -151,7 +167,7 @@ export async function markMessageAsRead(messageId: string): Promise<boolean> {
  * Check Meta WhatsApp connection
  */
 export async function checkMetaConnection(): Promise<{ success: boolean; displayPhone?: string; verifiedName?: string; error?: string }> {
-  const { token, phoneId } = getMetaCredentials()
+  const { token, phoneId } = await getMetaCredentials()
 
   if (!token || !phoneId) {
     return {
@@ -186,7 +202,7 @@ export async function checkMetaConnection(): Promise<{ success: boolean; display
  * Retrieve binary or download URL for inbound WhatsApp media
  */
 export async function getMediaUrl(mediaId: string): Promise<{ url?: string; mimeType?: string; error?: string }> {
-  const { token } = getMetaCredentials()
+  const { token } = await getMetaCredentials()
   if (!token) return { error: 'No WHATSAPP_ACCESS_TOKEN' }
 
   try {

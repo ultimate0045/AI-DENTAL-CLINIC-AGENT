@@ -106,37 +106,150 @@ function getGoogleAuthClient() {
   });
 }
 
-function getCalendarClient() {
+function getCalendarClient(serviceAccountJson) {
+  if (serviceAccountJson && serviceAccountJson.trim()) {
+    try {
+      const parsed = typeof serviceAccountJson === 'string' ? JSON.parse(serviceAccountJson) : serviceAccountJson;
+      if (parsed.client_email && (parsed.private_key || parsed.privateKey)) {
+        let rawKey = parsed.private_key || parsed.privateKey || '';
+        if ((rawKey.startsWith('"') && rawKey.endsWith('"')) || (rawKey.startsWith("'") && rawKey.endsWith("'"))) {
+          rawKey = rawKey.slice(1, -1);
+        }
+        const privateKey = rawKey.replace(/\\n/g, '\n').replace(/\r\n/g, '\n').trim();
+        const auth = new google.auth.GoogleAuth({
+          credentials: { client_email: parsed.client_email, private_key: privateKey },
+          scopes: ['https://www.googleapis.com/auth/calendar', 'https://www.googleapis.com/auth/spreadsheets'],
+        });
+        return google.calendar({ version: 'v3', auth });
+      }
+    } catch (e) {
+      console.warn('[getCalendarClient] Custom service account error:', e.message);
+    }
+  }
   const auth = getGoogleAuthClient();
   return google.calendar({ version: 'v3', auth });
 }
 
-function getSheetsClient() {
+function getSheetsClient(serviceAccountJson) {
+  if (serviceAccountJson && serviceAccountJson.trim()) {
+    try {
+      const parsed = typeof serviceAccountJson === 'string' ? JSON.parse(serviceAccountJson) : serviceAccountJson;
+      if (parsed.client_email && (parsed.private_key || parsed.privateKey)) {
+        let rawKey = parsed.private_key || parsed.privateKey || '';
+        if ((rawKey.startsWith('"') && rawKey.endsWith('"')) || (rawKey.startsWith("'") && rawKey.endsWith("'"))) {
+          rawKey = rawKey.slice(1, -1);
+        }
+        const privateKey = rawKey.replace(/\\n/g, '\n').replace(/\r\n/g, '\n').trim();
+        const auth = new google.auth.GoogleAuth({
+          credentials: { client_email: parsed.client_email, private_key: privateKey },
+          scopes: ['https://www.googleapis.com/auth/calendar', 'https://www.googleapis.com/auth/spreadsheets'],
+        });
+        return google.sheets({ version: 'v4', auth });
+      }
+    } catch (e) {
+      console.warn('[getSheetsClient] Custom service account error:', e.message);
+    }
+  }
   const auth = getGoogleAuthClient();
   return google.sheets({ version: 'v4', auth });
 }
 
-// ─── Helper: Get Clinic Settings (Cached for 5 mins to prevent DB lag) ───────
+// ─── Helper: Get Clinic Settings & Dynamic Credentials (Cached 30s) ───────────
 let cachedClinicSettings = null;
 let cachedClinicSettingsExpiry = 0;
+const SETTINGS_CACHE_TTL = 30 * 1000; // 30 seconds
 
-async function getClinicSettings() {
+function invalidateClinicSettingsCache() {
+  cachedClinicSettings = null;
+  cachedClinicSettingsExpiry = 0;
+  console.log('🔄 [Cache] Dynamic credentials & clinic settings cache cleared.');
+}
+
+async function getClinicSettings(forceFresh = false) {
   const now = Date.now();
-  if (cachedClinicSettings && now < cachedClinicSettingsExpiry) {
+  if (!forceFresh && cachedClinicSettings && now < cachedClinicSettingsExpiry) {
     return cachedClinicSettings;
   }
   try {
-    const { data, error } = await supabase
+    const { data: dbData } = await supabase
       .from('clinic_settings')
       .select('*')
       .limit(1)
-      .single();
+      .maybeSingle();
 
-    if (error || !data) throw new Error('No clinic settings in DB');
-    cachedClinicSettings = data;
-    cachedClinicSettingsExpiry = now + 5 * 60 * 1000;
-    return data;
-  } catch {
+    // Also fetch knowledge_base fallback row for dynamic integrations (source_name = 'clinic_integrations')
+    let kbMeta = {};
+    try {
+      const { data: kbRow } = await supabase
+        .from('knowledge_base')
+        .select('metadata')
+        .eq('source_name', 'clinic_integrations')
+        .maybeSingle();
+      if (kbRow?.metadata) kbMeta = kbRow.metadata;
+    } catch {}
+
+    const resolved = {
+      ...(dbData || {}),
+      meta_access_token:
+        dbData?.meta_access_token ||
+        kbMeta?.meta_access_token ||
+        process.env.WHATSAPP_ACCESS_TOKEN ||
+        process.env.META_ACCESS_TOKEN ||
+        process.env.META_WHATSAPP_TOKEN ||
+        '',
+      meta_phone_number_id:
+        dbData?.meta_phone_number_id ||
+        kbMeta?.meta_phone_number_id ||
+        process.env.META_PHONE_NUMBER_ID ||
+        process.env.WHATSAPP_PHONE_NUMBER_ID ||
+        '',
+      meta_verify_token:
+        dbData?.meta_verify_token ||
+        kbMeta?.meta_verify_token ||
+        process.env.META_VERIFY_TOKEN ||
+        '',
+      google_calendar_id:
+        dbData?.google_calendar_id ||
+        kbMeta?.google_calendar_id ||
+        process.env.GOOGLE_CALENDAR_ID ||
+        '',
+      google_sheet_id:
+        dbData?.google_sheet_id ||
+        kbMeta?.google_sheet_id ||
+        process.env.GOOGLE_SHEET_ID ||
+        '',
+      google_service_account_json:
+        dbData?.google_service_account_json ||
+        kbMeta?.google_service_account_json ||
+        process.env.GOOGLE_SERVICE_ACCOUNT_JSON ||
+        '',
+      gemini_api_key:
+        dbData?.gemini_api_key ||
+        kbMeta?.gemini_api_key ||
+        process.env.GEMINI_API_KEY ||
+        '',
+      gemini_model:
+        dbData?.gemini_model ||
+        kbMeta?.gemini_model ||
+        process.env.GEMINI_MODEL ||
+        'gemini-1.5-flash',
+      clinic_name: dbData?.clinic_name || process.env.CLINIC_NAME || 'Dental Care Clinic',
+      doctor_name: dbData?.doctor_name || process.env.CLINIC_DOCTOR || 'Dr. Sharma',
+      address: dbData?.address || process.env.CLINIC_ADDRESS || '123 Medical Enclave',
+      phone: dbData?.phone || process.env.CLINIC_PHONE || '+91 98765 43210',
+      timings_start: (dbData?.timings_start || process.env.CLINIC_TIMINGS_START || '09:00').slice(0, 5),
+      timings_end: (dbData?.timings_end || process.env.CLINIC_TIMINGS_END || '18:00').slice(0, 5),
+      lunch_start: (dbData?.lunch_start || process.env.CLINIC_LUNCH_START || '13:00').slice(0, 5),
+      lunch_end: (dbData?.lunch_end || process.env.CLINIC_LUNCH_END || '14:00').slice(0, 5),
+      weekly_off: dbData?.weekly_off || process.env.CLINIC_WEEKLY_OFF || 'Sunday',
+      consultation_fee: Number(dbData?.consultation_fee ?? process.env.CLINIC_CONSULTATION_FEE ?? 500),
+    };
+
+    cachedClinicSettings = resolved;
+    cachedClinicSettingsExpiry = now + SETTINGS_CACHE_TTL;
+    return resolved;
+  } catch (err) {
+    console.warn('[getClinicSettings] Error fetching settings:', err.message);
     const fallback = {
       clinic_name: process.env.CLINIC_NAME || 'Dental Clinic',
       doctor_name: process.env.DOCTOR_NAME || 'Doctor',
@@ -146,14 +259,16 @@ async function getClinicSettings() {
       lunch_start: process.env.LUNCH_START || '13:00',
       lunch_end: process.env.LUNCH_END || '14:00',
       weekly_off: process.env.WEEKLY_OFF || 'Sunday',
-      consultation_fee: process.env.CONSULTATION_FEE || '',
-      services: process.env.CLINIC_SERVICES || '',
+      consultation_fee: process.env.CONSULTATION_FEE || '500',
       google_calendar_id: process.env.GOOGLE_CALENDAR_ID || '',
       google_sheet_id: process.env.GOOGLE_SHEET_ID || '',
-      faq: process.env.CLINIC_FAQ || '',
+      meta_access_token: process.env.WHATSAPP_ACCESS_TOKEN || process.env.META_ACCESS_TOKEN || '',
+      meta_phone_number_id: process.env.META_PHONE_NUMBER_ID || '',
+      meta_verify_token: process.env.META_VERIFY_TOKEN || '',
+      gemini_api_key: process.env.GEMINI_API_KEY || '',
     };
     cachedClinicSettings = fallback;
-    cachedClinicSettingsExpiry = now + 60 * 1000;
+    cachedClinicSettingsExpiry = now + SETTINGS_CACHE_TTL;
     return fallback;
   }
 }
@@ -236,15 +351,23 @@ function getExactWeekday(dateStr) {
   return new Date(year, month - 1, day, 12, 0, 0).toLocaleDateString('en-US', { weekday: 'long' });
 }
 
-function getMetaAccessToken() {
-  return process.env.WHATSAPP_ACCESS_TOKEN || process.env.META_ACCESS_TOKEN || process.env.META_WHATSAPP_TOKEN || '';
+async function getMetaAccessToken() {
+  const settings = await getClinicSettings();
+  return settings.meta_access_token || process.env.WHATSAPP_ACCESS_TOKEN || process.env.META_ACCESS_TOKEN || process.env.META_WHATSAPP_TOKEN || '';
+}
+
+async function getMetaPhoneNumberId() {
+  const settings = await getClinicSettings();
+  return settings.meta_phone_number_id || process.env.META_PHONE_NUMBER_ID || process.env.WHATSAPP_PHONE_NUMBER_ID || '';
 }
 
 // ─── Helper: Send WhatsApp Message ───────────────────────────────────────────
 async function sendWhatsAppMessage(phone, text) {
   try {
     const messageBody = text ? text.trim() : '';
-    const url = `${META_GRAPH_URL}/${process.env.META_PHONE_NUMBER_ID}/messages`;
+    const phoneId = await getMetaPhoneNumberId();
+    const token = await getMetaAccessToken();
+    const url = `${META_GRAPH_URL}/${phoneId}/messages`;
     const response = await axios.post(
       url,
       {
@@ -256,7 +379,7 @@ async function sendWhatsAppMessage(phone, text) {
       },
       {
         headers: {
-          Authorization: `Bearer ${getMetaAccessToken()}`,
+          Authorization: `Bearer ${token}`,
           'Content-Type': 'application/json',
         },
       }
@@ -577,7 +700,7 @@ async function getCachedGoogleCalendarBusySlots(date, calendarId) {
 
   if (hasValidCalendar) {
     try {
-      const calendar = getCalendarClient();
+      const calendar = getCalendarClient(settings?.google_service_account_json);
       const startOfDay = new Date(`${date}T00:00:00.000Z`);
       const endOfDay = new Date(`${date}T23:59:59.999Z`);
 
@@ -820,7 +943,7 @@ async function bookAppointmentAction(params, settings) {
 
     if (hasValidCalendar) {
       try {
-        const calendar = getCalendarClient();
+        const calendar = getCalendarClient(settings?.google_service_account_json);
         await calendar.events.insert({
           calendarId,
           requestBody: {
@@ -841,7 +964,7 @@ async function bookAppointmentAction(params, settings) {
     // 2. Append to Google Sheets — Appointments tab
     if (sheetId) {
       try {
-        const sheets = getSheetsClient();
+        const sheets = getSheetsClient(settings?.google_service_account_json);
         await sheets.spreadsheets.values.append({
           spreadsheetId: sheetId,
           range: 'Appointments!A:H',
@@ -856,7 +979,7 @@ async function bookAppointmentAction(params, settings) {
 
       // 3. Upsert to Google Sheets — Patients_Leads tab
       try {
-        const sheets = getSheetsClient();
+        const sheets = getSheetsClient(settings?.google_service_account_json);
         const existing = await sheets.spreadsheets.values.get({
           spreadsheetId: sheetId,
           range: 'Patients_Leads!B:B',
@@ -1512,9 +1635,10 @@ DYNAMIC DATE RESOLUTION:
     const userParts = [];
     if (messageType === 'image' && imageUrl) {
       try {
+        const metaToken = await getMetaAccessToken();
         const imgResponse = await axios.get(imageUrl, {
           responseType: 'arraybuffer',
-          headers: { Authorization: `Bearer ${getMetaAccessToken()}` },
+          headers: { Authorization: `Bearer ${metaToken}` },
         });
         const base64 = Buffer.from(imgResponse.data).toString('base64');
         const mimeType = imgResponse.headers['content-type'] || 'image/jpeg';
@@ -1526,13 +1650,13 @@ DYNAMIC DATE RESOLUTION:
     userParts.push({ text: messageText || '[Patient sent an image]' });
 
     // Multi-model fallback strategy using direct REST API:
-    // 1. GEMINI_MODEL (.env or default gemini-3.5-flash-lite)
+    // 1. GEMINI_MODEL (settings, .env, or default gemini-3.5-flash-lite)
     // 2. gemini-3.5-flash-lite (sub-1s latency, active quota)
     // 3. gemini-flash-lite-latest
     // 4. gemini-3.5-flash
     // 5. gemini-2.5-flash
     const candidateModels = [
-      process.env.GEMINI_MODEL || 'gemini-3.5-flash-lite',
+      settings.gemini_model || process.env.GEMINI_MODEL || 'gemini-3.5-flash-lite',
       'gemini-3.5-flash-lite',
       'gemini-flash-lite-latest',
       'gemini-3.5-flash',
@@ -1557,7 +1681,7 @@ DYNAMIC DATE RESOLUTION:
           systemPrompt,
           contents: conversationContents,
           tools,
-          apiKey: process.env.GEMINI_API_KEY,
+          apiKey: settings.gemini_api_key || process.env.GEMINI_API_KEY,
           timeoutMs: 10000,
         });
         activeModelName = mName;
@@ -1780,7 +1904,7 @@ DYNAMIC DATE RESOLUTION:
             systemPrompt,
             contents: conversationContents,
             tools,
-            apiKey: process.env.GEMINI_API_KEY,
+            apiKey: settings.gemini_api_key || process.env.GEMINI_API_KEY,
             timeoutMs: 10000,
           });
           geminiData = nextData;
@@ -1929,17 +2053,21 @@ async function getConnectionStatus() {
 
   // Test Meta API
   try {
-    await axios.get(
-      `${META_GRAPH_URL}/${process.env.META_PHONE_NUMBER_ID}`,
-      { headers: { Authorization: `Bearer ${getMetaAccessToken()}` } }
-    );
-    status.meta = true;
+    const phoneId = await getMetaPhoneNumberId();
+    const token = await getMetaAccessToken();
+    if (phoneId && token) {
+      await axios.get(
+        `${META_GRAPH_URL}/${phoneId}`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      status.meta = true;
+    }
   } catch {}
 
   // Test Google Calendar
   try {
-    const calendar = getCalendarClient();
     const settings = await getClinicSettings();
+    const calendar = getCalendarClient(settings?.google_service_account_json);
     const calId = settings.google_calendar_id || process.env.GOOGLE_CALENDAR_ID || '';
     status.calendar_id = calId;
     const hasValidCalendar =
@@ -1958,8 +2086,8 @@ async function getConnectionStatus() {
 
   // Test Google Sheets
   try {
-    const sheets = getSheetsClient();
     const settings = await getClinicSettings();
+    const sheets = getSheetsClient(settings?.google_service_account_json);
     const sheetId = settings.google_sheet_id || process.env.GOOGLE_SHEET_ID;
     if (sheetId) {
       await sheets.spreadsheets.get({ spreadsheetId: sheetId });
@@ -1971,19 +2099,22 @@ async function getConnectionStatus() {
 }
 
 // ─── Webhook: GET /webhook & /api/webhook (Verification) ─────────────────────
-app.get(['/webhook', '/api/webhook'], (req, res) => {
+app.get(['/webhook', '/api/webhook'], async (req, res) => {
   const mode = req.query['hub.mode'];
   const token = req.query['hub.verify_token'];
   const challenge = req.query['hub.challenge'];
 
   console.log(`[Webhook GET] Received verification request: mode=${mode}, token=${token}, challenge=${challenge}`);
 
-  if (mode === 'subscribe' && token === process.env.META_VERIFY_TOKEN) {
+  const settings = await getClinicSettings();
+  const expectedVerifyToken = settings.meta_verify_token || process.env.META_VERIFY_TOKEN;
+
+  if (mode === 'subscribe' && token === expectedVerifyToken) {
     console.log('[Webhook GET] Verification successful — returning challenge:', challenge);
     res.setHeader('Content-Type', 'text/plain');
     return res.status(200).send(challenge);
   }
-  console.warn(`[Webhook GET] Verification failed: mode=${mode}, token=${token}, expected=${process.env.META_VERIFY_TOKEN}`);
+  console.warn(`[Webhook GET] Verification failed: mode=${mode}, token=${token}, expected=${expectedVerifyToken}`);
   return res.sendStatus(403);
 });
 
@@ -2046,20 +2177,28 @@ app.post(['/webhook', '/api/webhook'], async (req, res) => {
     })).catch(() => {});
 
     // Mark message as read on WhatsApp (fire & forget, non-blocking)
-    axios.post(
-      `${META_GRAPH_URL}/${process.env.META_PHONE_NUMBER_ID}/messages`,
-      {
-        messaging_product: 'whatsapp',
-        status: 'read',
-        message_id,
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${getMetaAccessToken()}`,
-          'Content-Type': 'application/json',
-        },
-      }
-    ).catch(() => {});
+    (async () => {
+      try {
+        const phoneId = await getMetaPhoneNumberId();
+        const token = await getMetaAccessToken();
+        if (phoneId && token) {
+          await axios.post(
+            `${META_GRAPH_URL}/${phoneId}/messages`,
+            {
+              messaging_product: 'whatsapp',
+              status: 'read',
+              message_id,
+            },
+            {
+              headers: {
+                Authorization: `Bearer ${token}`,
+                'Content-Type': 'application/json',
+              },
+            }
+          );
+        }
+      } catch {}
+    })().catch(() => {});
 
     // ── Extract message body ───────────────────────────────────────────────
     let messageText = '';
@@ -2073,8 +2212,9 @@ app.post(['/webhook', '/api/webhook'], async (req, res) => {
       const mediaId = rawMessage.image?.id;
       messageText = rawMessage.image?.caption || '';
       try {
+        const token = await getMetaAccessToken();
         const mediaRes = await axios.get(`${META_GRAPH_URL}/${mediaId}`, {
-          headers: { Authorization: `Bearer ${getMetaAccessToken()}` },
+          headers: { Authorization: `Bearer ${token}` },
         });
         imageUrl = mediaRes.data.url;
       } catch (err) {
@@ -2318,11 +2458,19 @@ app.post('/api/settings', async (req, res) => {
     }
 
     if (result.error) throw result.error;
+    invalidateClinicSettingsCache();
     res.json({ success: true, data: result.data });
   } catch (err) {
     console.error('[/api/settings]', err.message);
     res.status(500).json({ error: err.message });
   }
+});
+
+// POST /api/settings/invalidate-cache — Immediately clear in-memory credentials cache
+app.post('/api/settings/invalidate-cache', (req, res) => {
+  invalidateClinicSettingsCache();
+  console.log('🔄 [Settings Cache] In-memory cache invalidated via API.');
+  res.json({ success: true, message: 'Settings cache invalidated.' });
 });
 
 // POST /api/sheets/setup — Create Google Sheets tabs with headers
@@ -2334,7 +2482,7 @@ app.post('/api/sheets/setup', async (req, res) => {
       return res.status(400).json({ error: 'Google Sheet ID not configured' });
     }
 
-    const sheets = getSheetsClient();
+    const sheets = getSheetsClient(settings?.google_service_account_json);
 
     // Get existing sheets
     const spreadsheet = await sheets.spreadsheets.get({ spreadsheetId: sheetId });

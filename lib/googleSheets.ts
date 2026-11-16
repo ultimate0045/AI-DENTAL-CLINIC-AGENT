@@ -61,7 +61,24 @@ export function cleanSheetId(input?: string): string {
 /**
  * Returns authenticated Google auth client for Google Sheets
  */
-export function getSheetsAuthClient() {
+export function getSheetsAuthClient(serviceAccountJson?: string) {
+  if (serviceAccountJson && serviceAccountJson.trim()) {
+    try {
+      const parsed = typeof serviceAccountJson === 'string' ? JSON.parse(serviceAccountJson) : serviceAccountJson
+      if (parsed.client_email && (parsed.private_key || parsed.privateKey)) {
+        return new google.auth.GoogleAuth({
+          credentials: {
+            client_email: parsed.client_email,
+            private_key: parseGooglePrivateKey(parsed.private_key || parsed.privateKey),
+          },
+          scopes: ['https://www.googleapis.com/auth/spreadsheets'],
+        })
+      }
+    } catch (e: any) {
+      console.warn('[GoogleSheets] Error parsing custom serviceAccountJson:', e?.message)
+    }
+  }
+
   const jsonPath = path.join(process.cwd(), 'service-account.json')
   if (fs.existsSync(jsonPath)) {
     return new google.auth.GoogleAuth({
@@ -98,8 +115,8 @@ export function getSheetsAuthClient() {
 /**
  * Returns authenticated Google Sheets client instance
  */
-export function getSheetsClient() {
-  const auth = getSheetsAuthClient()
+export function getSheetsClient(serviceAccountJson?: string) {
+  const auth = getSheetsAuthClient(serviceAccountJson)
   return google.sheets({ version: 'v4', auth })
 }
 

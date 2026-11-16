@@ -10,7 +10,7 @@ import * as Dialog from '@radix-ui/react-dialog'
 import {
   Plus, Trash2, CheckCircle2, XCircle, Loader2,
   Upload, FileText, AlertCircle, Info, Clock,
-  Link2, Settings2
+  Link2, Settings2, Eye, EyeOff, Copy, Check, ShieldCheck, Key, RefreshCw
 } from 'lucide-react'
 
 // ─── Local sub-types ────────────────────────────────────────────────────────
@@ -158,6 +158,12 @@ export function SettingsForm({ initialSettings, onSave }: SettingsFormProps) {
   // Extended state
   const [form, setForm] = useState<ExtendedSettings>({
     ...initialSettings,
+    metaAccessToken: initialSettings.metaAccessToken || '',
+    metaPhoneNumberId: initialSettings.metaPhoneNumberId || '',
+    metaVerifyToken: initialSettings.metaVerifyToken || '',
+    googleServiceAccountJson: initialSettings.googleServiceAccountJson || '',
+    geminiApiKey: initialSettings.geminiApiKey || '',
+    geminiModel: initialSettings.geminiModel || '',
     services: (initialSettings as any).services ?? [],
     faqs: (initialSettings as any).faqs ?? [],
     knowledgeBaseText: (initialSettings as any).knowledgeBaseText ?? '',
@@ -173,6 +179,32 @@ export function SettingsForm({ initialSettings, onSave }: SettingsFormProps) {
   const [calStatus, setCalStatus] = useState<ConnStatus>('idle')
   const [setupDialogOpen, setSetupDialogOpen] = useState(false)
   const [isSettingUp, setIsSettingUp] = useState(false)
+
+  // WhatsApp Meta & Secret fields state
+  const [metaStatus, setMetaStatus] = useState<ConnStatus>('idle')
+  const [metaDetail, setMetaDetail] = useState('')
+  const [showMetaToken, setShowMetaToken] = useState(false)
+  const [showVerifyToken, setShowVerifyToken] = useState(false)
+  const [showGeminiKey, setShowGeminiKey] = useState(false)
+  const [showServiceAccount, setShowServiceAccount] = useState(false)
+  const [copiedWebhook, setCopiedWebhook] = useState(false)
+
+  // Sync form when initialSettings loads asynchronously
+  useEffect(() => {
+    setForm(prev => ({
+      ...prev,
+      ...initialSettings,
+      metaAccessToken: initialSettings.metaAccessToken ?? prev.metaAccessToken ?? '',
+      metaPhoneNumberId: initialSettings.metaPhoneNumberId ?? prev.metaPhoneNumberId ?? '',
+      metaVerifyToken: initialSettings.metaVerifyToken ?? prev.metaVerifyToken ?? '',
+      googleServiceAccountJson: initialSettings.googleServiceAccountJson ?? prev.googleServiceAccountJson ?? '',
+      geminiApiKey: initialSettings.geminiApiKey ?? prev.geminiApiKey ?? '',
+      geminiModel: initialSettings.geminiModel ?? prev.geminiModel ?? '',
+      services: (initialSettings as any).services ?? prev.services ?? [],
+      faqs: (initialSettings as any).faqs ?? prev.faqs ?? [],
+      knowledgeBaseText: (initialSettings as any).knowledgeBaseText ?? prev.knowledgeBaseText ?? '',
+    }))
+  }, [initialSettings])
 
   // KB state
   const [kbFile, setKbFile] = useState<File | null>(null)
@@ -191,6 +223,42 @@ export function SettingsForm({ initialSettings, onSave }: SettingsFormProps) {
     setIsDirty(true)
     setErrors(prev => ({ ...prev, [key]: undefined }))
   }, [])
+
+  async function testMeta() {
+    if (!form.metaPhoneNumberId?.trim()) {
+      addToast('Enter a WhatsApp Phone Number ID first', 'error')
+      return
+    }
+    setMetaStatus('testing')
+    setMetaDetail('')
+    try {
+      const res = await fetch('/api/whatsapp/test')
+      const data = await res.json()
+      if (data.success) {
+        setMetaStatus('ok')
+        setMetaDetail(`${data.displayName || 'Connected'} (${data.qualityRating || 'OK'})`)
+        addToast(`WhatsApp connected: ${data.displayName || 'OK'}`, 'success')
+      } else {
+        setMetaStatus('fail')
+        setMetaDetail(data.error || 'Connection failed')
+        addToast(data.error || 'Meta connection test failed', 'error')
+      }
+    } catch (err: any) {
+      setMetaStatus('fail')
+      setMetaDetail(err?.message || 'Network error')
+      addToast(err?.message || 'Meta connection test failed', 'error')
+    }
+  }
+
+  function copyWebhookUrl() {
+    const url = typeof window !== 'undefined'
+      ? `${window.location.origin}/webhook`
+      : 'https://your-domain.com/webhook'
+    navigator.clipboard.writeText(url)
+    setCopiedWebhook(true)
+    addToast('Webhook Callback URL copied to clipboard!', 'success')
+    setTimeout(() => setCopiedWebhook(false), 2500)
+  }
 
   // ── Validation ──────────────────────────────────────────────────────────────
   function validate(): boolean {
@@ -625,8 +693,153 @@ export function SettingsForm({ initialSettings, onSave }: SettingsFormProps) {
 
         {/* ── Tab 3: Integrations ────────────────────────────────────────────── */}
         <Tabs.Content value="integrations" className="space-y-6">
+          {/* WhatsApp Meta Business API Section */}
+          <div className="border border-gray-200 dark:border-[#3B4A54] rounded-lg p-5 space-y-5 bg-white dark:bg-[#1f2c33]/50">
+            <div className="flex items-center justify-between border-b border-gray-100 dark:border-[#3B4A54] pb-3">
+              <div className="flex items-center gap-2.5">
+                <span className="text-xl">💬</span>
+                <div>
+                  <h3 className="text-base font-semibold text-gray-900 dark:text-gray-100">WhatsApp Meta Cloud API</h3>
+                  <p className="text-xs text-gray-500 dark:text-gray-400">Configure your Meta Developer Account and Phone credentials</p>
+                </div>
+              </div>
+              <span className="inline-flex items-center gap-1 text-xs font-medium px-2.5 py-1 rounded-full bg-emerald-100 text-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300">
+                <ShieldCheck className="h-3.5 w-3.5" />
+                Production Ready
+              </span>
+            </div>
+
+            {/* Phone Number ID */}
+            <Field
+              label="WhatsApp Phone Number ID"
+              hint="Found in Meta App Dashboard → WhatsApp → API Setup → Phone number ID"
+              required
+            >
+              <div className="flex gap-2">
+                <Input
+                  value={form.metaPhoneNumberId || ''}
+                  onChange={e => { update('metaPhoneNumberId', e.target.value); setMetaStatus('idle') }}
+                  placeholder="e.g. 1441716485692503"
+                  className="font-mono text-sm"
+                />
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={testMeta}
+                  disabled={metaStatus === 'testing' || !form.metaPhoneNumberId?.trim()}
+                  className="shrink-0"
+                >
+                  {metaStatus === 'testing' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+                  Test Connection
+                </Button>
+              </div>
+              <div className="mt-1.5 flex items-center gap-2">
+                <StatusBadge status={metaStatus} />
+                {metaDetail && (
+                  <span className="text-xs text-gray-600 dark:text-gray-300 font-medium">
+                    {metaDetail}
+                  </span>
+                )}
+                {initialSettings.hasMetaPhoneId && metaStatus === 'idle' && (
+                  <span className="inline-flex items-center gap-1 text-xs text-emerald-600 dark:text-emerald-400">
+                    <CheckCircle2 className="h-3 w-3" /> Saved in Database
+                  </span>
+                )}
+              </div>
+            </Field>
+
+            {/* Permanent Access Token */}
+            <Field
+              label="Meta Permanent Access Token (System User Token)"
+              hint="Generate from Meta Business Manager → Users → System Users with whatsapp_business_messaging and whatsapp_business_management permissions. Saved securely in Supabase."
+              required
+            >
+              <div className="relative flex items-center">
+                <Input
+                  type={showMetaToken ? 'text' : 'password'}
+                  value={form.metaAccessToken || ''}
+                  onChange={e => update('metaAccessToken', e.target.value)}
+                  placeholder={
+                    initialSettings.hasMetaToken
+                      ? '•••••••••••••••• (Leave unchanged to keep current token)'
+                      : 'EAAY... (Paste Permanent Meta Token)'
+                  }
+                  className="font-mono text-sm pr-10"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowMetaToken(!showMetaToken)}
+                  className="absolute right-3 p-1 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200"
+                  tabIndex={-1}
+                >
+                  {showMetaToken ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                </button>
+              </div>
+              {initialSettings.hasMetaToken && (
+                <p className="text-xs text-emerald-600 dark:text-emerald-400 mt-1 flex items-center gap-1">
+                  <CheckCircle2 className="h-3 w-3" /> Active token configured. Enter a new token only to replace it.
+                </p>
+              )}
+            </Field>
+
+            {/* Webhook Verify Token */}
+            <Field
+              label="Webhook Verify Token"
+              hint="A private secret string you choose (e.g. clinic_secret_2026). Must match what you enter in Meta Webhook configuration."
+              required
+            >
+              <div className="relative flex items-center">
+                <Input
+                  type={showVerifyToken ? 'text' : 'password'}
+                  value={form.metaVerifyToken || ''}
+                  onChange={e => update('metaVerifyToken', e.target.value)}
+                  placeholder="e.g. my_custom_clinic_verify_token"
+                  className="font-mono text-sm pr-10"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowVerifyToken(!showVerifyToken)}
+                  className="absolute right-3 p-1 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200"
+                  tabIndex={-1}
+                >
+                  {showVerifyToken ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                </button>
+              </div>
+            </Field>
+
+            {/* Webhook Callback URL Card */}
+            <div className="rounded-lg bg-gray-50 dark:bg-[#2A3942] p-4 border border-gray-200 dark:border-[#3B4A54] space-y-3">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-semibold uppercase tracking-wider text-gray-500 dark:text-gray-400 flex items-center gap-1.5">
+                  <Link2 className="h-3.5 w-3.5 text-[#25D366]" /> Live Webhook Callback URL
+                </span>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={copyWebhookUrl}
+                  className="h-7 text-xs gap-1.5"
+                >
+                  {copiedWebhook ? <Check className="h-3.5 w-3.5 text-[#25D366]" /> : <Copy className="h-3.5 w-3.5" />}
+                  {copiedWebhook ? 'Copied!' : 'Copy URL'}
+                </Button>
+              </div>
+              <div className="p-2.5 rounded bg-white dark:bg-[#1f2c33] border border-gray-200 dark:border-[#3B4A54] font-mono text-xs text-gray-800 dark:text-gray-200 break-all select-all">
+                {typeof window !== 'undefined' ? `${window.location.origin}/webhook` : 'https://your-domain.com/webhook'}
+              </div>
+              <div className="text-xs text-gray-500 dark:text-gray-400 space-y-1">
+                <p className="font-medium text-gray-700 dark:text-gray-300">How to link with Meta:</p>
+                <ol className="list-decimal list-inside space-y-0.5 pl-1">
+                  <li>In Meta App Dashboard, go to <strong>WhatsApp → Configuration</strong>.</li>
+                  <li>Click <strong>Edit</strong> next to Webhook, paste the Callback URL above, and enter your <strong>Webhook Verify Token</strong>.</li>
+                  <li>Click <strong>Verify and Save</strong>, then click <strong>Manage</strong> webhook fields and subscribe to <code>messages</code>.</li>
+                </ol>
+              </div>
+            </div>
+          </div>
+
           {/* Google Sheets */}
-          <div className="border border-gray-200 dark:border-[#3B4A54] rounded-lg p-5 space-y-4">
+          <div className="border border-gray-200 dark:border-[#3B4A54] rounded-lg p-5 space-y-4 bg-white dark:bg-[#1f2c33]/50">
             <h3 className="text-sm font-semibold text-gray-800 dark:text-gray-200 flex items-center gap-2">
               <span className="text-lg">📊</span> Google Sheets
             </h3>
@@ -653,16 +866,16 @@ export function SettingsForm({ initialSettings, onSave }: SettingsFormProps) {
               >
                 📋 Setup Sheet Headers
               </Button>
-              <p className="text-xs text-gray-500 dark:text-gray-400">Creates worksheet tabs with predefined column headers</p>
+              <p className="text-xs text-gray-500 dark:text-gray-400">Creates Appointments and Patients_Leads tabs with predefined headers</p>
             </div>
           </div>
 
           {/* Google Calendar */}
-          <div className="border border-gray-200 dark:border-[#3B4A54] rounded-lg p-5 space-y-4">
+          <div className="border border-gray-200 dark:border-[#3B4A54] rounded-lg p-5 space-y-4 bg-white dark:bg-[#1f2c33]/50">
             <h3 className="text-sm font-semibold text-gray-800 dark:text-gray-200 flex items-center gap-2">
               <span className="text-lg">📅</span> Google Calendar
             </h3>
-            <Field label="Google Calendar ID" hint="Found in Calendar Settings → Integrate calendar. Usually looks like an email address.">
+            <Field label="Google Calendar ID" hint="Found in Calendar Settings → Integrate calendar. Usually looks like an email address or group ID.">
               <div className="flex gap-2">
                 <Input
                   value={form.googleCalendarId}
@@ -678,50 +891,104 @@ export function SettingsForm({ initialSettings, onSave }: SettingsFormProps) {
             </Field>
           </div>
 
-          {/* WhatsApp */}
-          <div className="border border-gray-200 dark:border-[#3B4A54] rounded-lg p-5 space-y-3">
-            <h3 className="text-sm font-semibold text-gray-800 dark:text-gray-200 flex items-center gap-2">
-              <span className="text-lg">💬</span> WhatsApp
-            </h3>
-            <div className="flex items-center gap-3">
-              <span className="text-sm text-gray-600 dark:text-gray-400">Phone Number ID:</span>
-              <code className="px-2 py-0.5 rounded bg-gray-100 dark:bg-[#1f2c33] text-xs font-mono text-gray-800 dark:text-gray-200">
-                {process.env.NEXT_PUBLIC_META_PHONE_NUMBER_ID || '(not configured)'}
-              </code>
-              {process.env.NEXT_PUBLIC_META_PHONE_NUMBER_ID
-                ? <CheckCircle2 className="h-4 w-4 text-green-500" />
-                : <XCircle className="h-4 w-4 text-red-500" />}
+          {/* AI & Custom Credentials Overrides (Optional) */}
+          <div className="border border-gray-200 dark:border-[#3B4A54] rounded-lg p-5 space-y-4 bg-white dark:bg-[#1f2c33]/50">
+            <div className="flex items-center justify-between border-b border-gray-100 dark:border-[#3B4A54] pb-3">
+              <div className="flex items-center gap-2">
+                <Key className="h-4 w-4 text-amber-500" />
+                <h3 className="text-sm font-semibold text-gray-800 dark:text-gray-200">
+                  AI & Credentials Overrides (Optional)
+                </h3>
+              </div>
+              <span className="text-xs text-gray-400 font-mono">Multi-tenant / Client overrides</span>
             </div>
-            <p className="text-xs text-gray-500 dark:text-gray-400 flex items-start gap-1.5">
-              <Info className="h-3.5 w-3.5 mt-0.5 shrink-0" />
-              WhatsApp integration is configured via environment variables. Contact your administrator to change the phone number.
+            <p className="text-xs text-gray-500 dark:text-gray-400">
+              Leave these fields blank to automatically use the server's default environment variables. Provide values here only if this clinic uses dedicated Google/Gemini accounts.
             </p>
-          </div>
 
-          {/* API Keys status */}
-          <div className="border border-gray-200 dark:border-[#3B4A54] rounded-lg p-5 space-y-3">
-            <h3 className="text-sm font-semibold text-gray-800 dark:text-gray-200 flex items-center gap-2">
-              <span className="text-lg">🔑</span> API Keys Status
-            </h3>
-            <div className="space-y-2">
-              {[
-                { label: 'Google Service Account', key: 'GOOGLE_SERVICE_ACCOUNT_EMAIL' },
-                { label: 'Gemini API Key', key: 'GOOGLE_GEMINI_API_KEY' },
-                { label: 'Meta WhatsApp Token', key: 'META_WHATSAPP_TOKEN' },
-                { label: 'Supabase URL', key: 'NEXT_PUBLIC_SUPABASE_URL' },
-              ].map(({ label, key }) => (
-                <div key={key} className="flex items-center justify-between py-1 border-b border-gray-100 dark:border-[#3B4A54] last:border-0">
-                  <span className="text-sm text-gray-700 dark:text-gray-300">{label}</span>
-                  <span className={cn(
-                    'inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full',
-                    'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400'
-                  )}>
-                    <CheckCircle2 className="h-3 w-3" /> Configured
-                  </span>
-                </div>
-              ))}
+            {/* Gemini API Key */}
+            <Field
+              label="Google Gemini API Key"
+              hint="Custom Gemini API key for this clinic. Falls back to server GEMINI_API_KEY if left blank."
+            >
+              <div className="relative flex items-center">
+                <Input
+                  type={showGeminiKey ? 'text' : 'password'}
+                  value={form.geminiApiKey || ''}
+                  onChange={e => update('geminiApiKey', e.target.value)}
+                  placeholder={
+                    initialSettings.hasGeminiKey
+                      ? '•••••••••••••••• (Leave unchanged to keep current key)'
+                      : 'AIzaSy... (Optional override)'
+                  }
+                  className="font-mono text-sm pr-10"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowGeminiKey(!showGeminiKey)}
+                  className="absolute right-3 p-1 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200"
+                  tabIndex={-1}
+                >
+                  {showGeminiKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                </button>
+              </div>
+            </Field>
+
+            {/* Gemini Model */}
+            <Field
+              label="Gemini Model"
+              hint="Recommended: gemini-3.5-flash-lite for instant sub-second responses on WhatsApp."
+            >
+              <select
+                value={form.geminiModel || 'gemini-3.5-flash-lite'}
+                onChange={e => update('geminiModel', e.target.value)}
+                className={cn(
+                  'w-full rounded-md border border-gray-200 bg-white px-3 py-2 text-sm h-10',
+                  'focus:outline-none focus:ring-2 focus:ring-[#25D366] focus:border-transparent',
+                  'dark:border-[#3B4A54] dark:bg-[#2A3942] dark:text-gray-100 font-mono text-xs'
+                )}
+              >
+                <option value="gemini-3.5-flash-lite">gemini-3.5-flash-lite (Recommended — Ultra-fast)</option>
+                <option value="gemini-3.5-flash">gemini-3.5-flash</option>
+                <option value="gemini-2.5-flash">gemini-2.5-flash</option>
+                <option value="gemini-flash-lite-latest">gemini-flash-lite-latest</option>
+              </select>
+            </Field>
+
+            {/* Google Service Account JSON */}
+            <div className="space-y-2 pt-2">
+              <div className="flex items-center justify-between">
+                <label className="text-sm font-medium text-gray-700 dark:text-gray-200">
+                  Google Service Account Key (JSON Override)
+                </label>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setShowServiceAccount(!showServiceAccount)}
+                  className="h-7 text-xs"
+                >
+                  {showServiceAccount ? 'Hide JSON' : 'Show / Edit JSON'}
+                </Button>
+              </div>
+              <p className="text-xs text-gray-500 dark:text-gray-400">
+                Optional JSON override for Google Calendar and Sheets access. If empty, the server's default service account is used.
+              </p>
+              {showServiceAccount && (
+                <textarea
+                  value={form.googleServiceAccountJson || ''}
+                  onChange={e => update('googleServiceAccountJson', e.target.value)}
+                  rows={6}
+                  placeholder={`{\n  "type": "service_account",\n  "project_id": "...",\n  "private_key": "-----BEGIN PRIVATE KEY-----...",\n  "client_email": "..."\n}`}
+                  className={cn(
+                    'w-full rounded-md border border-gray-200 bg-white px-3 py-2 text-xs font-mono resize-y',
+                    'placeholder:text-gray-400 text-gray-900',
+                    'focus:outline-none focus:ring-2 focus:ring-[#25D366] focus:border-transparent',
+                    'dark:border-[#3B4A54] dark:bg-[#2A3942] dark:text-gray-100'
+                  )}
+                />
+              )}
             </div>
-            <p className="text-xs text-gray-500 dark:text-gray-400">Actual key values are hidden for security. Update them in your <code className="font-mono">.env</code> file.</p>
           </div>
         </Tabs.Content>
 
@@ -733,10 +1000,12 @@ export function SettingsForm({ initialSettings, onSave }: SettingsFormProps) {
             <div className="flex items-center gap-3">
               <span className="text-sm text-gray-600 dark:text-gray-400">Active Model:</span>
               <code className="px-2 py-1 rounded bg-gray-100 dark:bg-[#1f2c33] text-sm font-mono text-[#25D366]">
-                {process.env.NEXT_PUBLIC_GEMINI_MODEL || 'gemini-2.5-flash'}
+                {form.geminiModel || 'gemini-3.5-flash-lite'}
               </code>
             </div>
-            <p className="text-xs text-gray-500 dark:text-gray-400">Model selection is configured via environment variables.</p>
+            <p className="text-xs text-gray-500 dark:text-gray-400">
+              Configured dynamically in the <strong>Integrations</strong> tab under AI & Credentials Overrides.
+            </p>
           </div>
 
           {/* System Prompt Preview */}

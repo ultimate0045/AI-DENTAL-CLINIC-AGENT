@@ -56,6 +56,16 @@ CREATE TABLE IF NOT EXISTS clinic_settings (
   google_sheet_id      TEXT        DEFAULT '',
   google_calendar_id   TEXT        DEFAULT '',
 
+  -- WhatsApp Meta Integrations (Configurable via Dashboard UI)
+  meta_access_token           TEXT        DEFAULT '',
+  meta_phone_number_id        TEXT        DEFAULT '',
+  meta_verify_token           TEXT        DEFAULT '',
+
+  -- AI & Credentials Overrides (Optional overrides via Dashboard UI)
+  gemini_api_key              TEXT        DEFAULT '',
+  gemini_model                TEXT        DEFAULT '',
+  google_service_account_json TEXT        DEFAULT '',
+
   -- Uploaded knowledge base (PDF / plain-text content for the AI)
   knowledge_base_text  TEXT        DEFAULT '',
 
@@ -66,6 +76,14 @@ CREATE TABLE IF NOT EXISTS clinic_settings (
 COMMENT ON TABLE  clinic_settings IS 'Singleton row that holds all configurable clinic settings.';
 COMMENT ON COLUMN clinic_settings.services IS 'Array of service objects: [{name, price, duration_mins}]';
 COMMENT ON COLUMN clinic_settings.faqs     IS 'Array of FAQ objects: [{question, answer}]';
+
+-- Idempotent column migrations for existing databases
+ALTER TABLE clinic_settings ADD COLUMN IF NOT EXISTS meta_access_token TEXT DEFAULT '';
+ALTER TABLE clinic_settings ADD COLUMN IF NOT EXISTS meta_phone_number_id TEXT DEFAULT '';
+ALTER TABLE clinic_settings ADD COLUMN IF NOT EXISTS meta_verify_token TEXT DEFAULT '';
+ALTER TABLE clinic_settings ADD COLUMN IF NOT EXISTS gemini_api_key TEXT DEFAULT '';
+ALTER TABLE clinic_settings ADD COLUMN IF NOT EXISTS gemini_model TEXT DEFAULT '';
+ALTER TABLE clinic_settings ADD COLUMN IF NOT EXISTS google_service_account_json TEXT DEFAULT '';
 
 
 -- ---------------------------------------------------------------------------

@@ -22,7 +22,24 @@ export interface BookCalendarParams {
   visitType?: string
 }
 
-export function getCalendarAuthClient() {
+export function getCalendarAuthClient(serviceAccountJson?: string) {
+  if (serviceAccountJson && serviceAccountJson.trim()) {
+    try {
+      const parsed = typeof serviceAccountJson === 'string' ? JSON.parse(serviceAccountJson) : serviceAccountJson
+      if (parsed.client_email && (parsed.private_key || parsed.privateKey)) {
+        return new google.auth.GoogleAuth({
+          credentials: {
+            client_email: parsed.client_email,
+            private_key: parseGooglePrivateKey(parsed.private_key || parsed.privateKey),
+          },
+          scopes: ['https://www.googleapis.com/auth/calendar'],
+        })
+      }
+    } catch (e: any) {
+      console.warn('[GoogleCalendar] Error parsing custom serviceAccountJson:', e?.message)
+    }
+  }
+
   const jsonPath = path.join(process.cwd(), 'service-account.json')
   if (fs.existsSync(jsonPath)) {
     return new google.auth.GoogleAuth({
@@ -47,8 +64,8 @@ export function getCalendarAuthClient() {
   })
 }
 
-export function getCalendarClient() {
-  const auth = getCalendarAuthClient()
+export function getCalendarClient(serviceAccountJson?: string) {
+  const auth = getCalendarAuthClient(serviceAccountJson)
   return google.calendar({ version: 'v3', auth })
 }
 

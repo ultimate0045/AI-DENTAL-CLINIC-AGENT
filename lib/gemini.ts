@@ -310,13 +310,20 @@ export async function processWithGemini(params: GeminiProcessParams): Promise<{
   replyText: string
   bookingCreated?: any
 }> {
-  const apiKey = process.env.GEMINI_API_KEY
+  const apiKey =
+    params.settings?.geminiApiKey ||
+    (params.settings as any)?.gemini_api_key ||
+    process.env.GEMINI_API_KEY
   if (!apiKey) {
-    throw new Error('GEMINI_API_KEY is not configured')
+    throw new Error('GEMINI_API_KEY is not configured in settings or environment variables')
   }
 
   const genAI = new GoogleGenerativeAI(apiKey)
-  const modelName = process.env.GEMINI_MODEL || 'gemini-3.5-flash'
+  const modelName =
+    params.settings?.geminiModel ||
+    (params.settings as any)?.gemini_model ||
+    process.env.GEMINI_MODEL ||
+    'gemini-3.5-flash'
 
   const systemInstruction = buildSystemPrompt(params.settings)
 
