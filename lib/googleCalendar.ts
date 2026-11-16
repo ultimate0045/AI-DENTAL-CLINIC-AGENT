@@ -1,7 +1,7 @@
 import fs from 'fs'
 import path from 'path'
 import { google } from 'googleapis'
-import { parseGooglePrivateKey, generateTimeSlots } from './utils'
+import { parseGooglePrivateKey, generateTimeSlots, normalizeDate } from './utils'
 
 export interface WorkingHoursConfig {
   timingsStart?: string
@@ -19,6 +19,7 @@ export interface BookCalendarParams {
   date: string // YYYY-MM-DD
   timeSlot: string // HH:MM
   durationMinutes?: number
+  visitType?: string
 }
 
 export function getCalendarAuthClient() {
@@ -59,6 +60,15 @@ export function resolveCalendarId(calendarId?: string): string {
   return id
 }
 
+const calendarEventsCache = new Map<string, { events: any[]; expiry: number }>()
+const CALENDAR_CACHE_TTL = 60 * 1000
+
+export function invalidateGoogleCalendarCache(date?: string) {
+  if (date) {
+    calendarEventsCache.delete(date)
+  }
+}
+
 /**
  * Test Google Calendar connection
  */
@@ -91,12 +101,12 @@ export async function checkCalendarConnection(
  * Check free 30-min slots for a given date
  */
 export async function checkAvailability(
-  date: string, // YYYY-MM-DD
+  rawDate: string,
   workingHours?: WorkingHoursConfig,
   calendarId?: string
 ): Promise<{ availableSlots: string[]; isOffDay: boolean; reason?: string }> {
+  const date = normalizeDate(rawDate) || rawDate
   const id = resolveCalendarId(calendarId)
-  const calendar = getCalendarClient()
 
   const timingsStart = workingHours?.timingsStart || '09:00'
   const timingsEnd = workingHours?.timingsEnd || '18:00'
@@ -141,18 +151,24 @@ export async function checkAvailability(
 
   let events: any[] = []
   if (id) {
-    try {
-      const calendar = getCalendarClient()
-      const eventsRes = await calendar.events.list({
-        calendarId: id,
-        timeMin,
-        timeMax,
-        singleEvents: true,
-        orderBy: 'startTime',
-      })
-      events = eventsRes.data.items || []
-    } catch (err: any) {
-      console.warn('[Calendar Warning] Error fetching calendar events:', err?.message)
+    const cached = calendarEventsCache.get(date)
+    if (cached && Date.now() < cached.expiry) {
+      events = cached.events
+    } else {
+      try {
+        const calendar = getCalendarClient()
+        const eventsRes = await calendar.events.list({
+          calendarId: id,
+          timeMin,
+          timeMax,
+          singleEvents: true,
+          orderBy: 'startTime',
+        })
+        events = eventsRes.data.items || []
+        calendarEventsCache.set(date, { events, expiry: Date.now() + CALENDAR_CACHE_TTL })
+      } catch (err: any) {
+        console.warn('[Calendar Warning] Error fetching calendar events:', err?.message)
+      }
     }
   }
 
@@ -205,14 +221,16 @@ export async function bookCalendarAppointment(
     }
     const calendar = getCalendarClient()
     const duration = params.durationMinutes || 30
+    const normalizedDate = normalizeDate(params.date) || params.date
 
     const [h, m] = params.timeSlot.split(':').map(Number)
-    const startDateTime = new Date(`${params.date}T${params.timeSlot}:00`)
+    const startDateTime = new Date(`${normalizedDate}T${params.timeSlot}:00`)
     const endDateTime = new Date(startDateTime.getTime() + duration * 60 * 1000)
 
+    const visitLabel = params.visitType === 'returning' ? 'Returning Patient' : 'First-time Patient'
     const event = {
-      summary: `🦷 ${params.patientName} - ${params.dentalIssue || 'Dental Consultation'}`,
-      description: `Patient: ${params.patientName}\nPhone: ${params.patientPhone}\nIssue: ${params.dentalIssue}\nBooked via WhatsApp AI Receptionist`,
+      summary: `${params.patientName} (${visitLabel}) - ${params.dentalIssue || 'Dental Consultation'}`,
+      description: `Patient: ${params.patientName}\nPhone: ${params.patientPhone}\nVisit Type: ${visitLabel}\nIssue: ${params.dentalIssue}\nBooked via WhatsApp AI Receptionist`,
       start: {
         dateTime: startDateTime.toISOString(),
       },
@@ -226,6 +244,8 @@ export async function bookCalendarAppointment(
       calendarId: id,
       requestBody: event,
     })
+
+    invalidateGoogleCalendarCache(normalizedDate)
 
     return {
       success: true,

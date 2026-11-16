@@ -9,17 +9,22 @@ export interface MetaSendResult {
   error?: string
 }
 
+function getMetaCredentials() {
+  const token = process.env.WHATSAPP_ACCESS_TOKEN || process.env.META_ACCESS_TOKEN || process.env.META_WHATSAPP_TOKEN
+  const phoneId = process.env.META_PHONE_NUMBER_ID || process.env.WHATSAPP_PHONE_NUMBER_ID
+  return { token, phoneId }
+}
+
 /**
  * Send text message through Meta WhatsApp Cloud API
  */
 export async function sendTextMessage(to: string, text: string): Promise<MetaSendResult> {
-  const token = process.env.META_ACCESS_TOKEN
-  const phoneId = process.env.META_PHONE_NUMBER_ID
+  const { token, phoneId } = getMetaCredentials()
 
   if (!token || !phoneId) {
     return {
       success: false,
-      error: 'META_ACCESS_TOKEN or META_PHONE_NUMBER_ID is missing in environment variables',
+      error: 'WHATSAPP_ACCESS_TOKEN or META_PHONE_NUMBER_ID is missing in environment variables',
     }
   }
 
@@ -71,8 +76,7 @@ export async function sendMediaMessage(
   mediaUrl: string,
   caption?: string
 ): Promise<MetaSendResult> {
-  const token = process.env.META_ACCESS_TOKEN
-  const phoneId = process.env.META_PHONE_NUMBER_ID
+  const { token, phoneId } = getMetaCredentials()
 
   if (!token || !phoneId) {
     return { success: false, error: 'Meta WhatsApp credentials missing' }
@@ -118,8 +122,7 @@ export async function sendMediaMessage(
  * Mark an incoming WhatsApp message as read
  */
 export async function markMessageAsRead(messageId: string): Promise<boolean> {
-  const token = process.env.META_ACCESS_TOKEN
-  const phoneId = process.env.META_PHONE_NUMBER_ID
+  const { token, phoneId } = getMetaCredentials()
   if (!token || !phoneId || !messageId) return false
 
   try {
@@ -148,13 +151,12 @@ export async function markMessageAsRead(messageId: string): Promise<boolean> {
  * Check Meta WhatsApp connection
  */
 export async function checkMetaConnection(): Promise<{ success: boolean; displayPhone?: string; verifiedName?: string; error?: string }> {
-  const token = process.env.META_ACCESS_TOKEN
-  const phoneId = process.env.META_PHONE_NUMBER_ID
+  const { token, phoneId } = getMetaCredentials()
 
   if (!token || !phoneId) {
     return {
       success: false,
-      error: 'Meta credentials (META_ACCESS_TOKEN / META_PHONE_NUMBER_ID) not configured',
+      error: 'Meta credentials (WHATSAPP_ACCESS_TOKEN / META_PHONE_NUMBER_ID) not configured',
     }
   }
 
@@ -184,8 +186,8 @@ export async function checkMetaConnection(): Promise<{ success: boolean; display
  * Retrieve binary or download URL for inbound WhatsApp media
  */
 export async function getMediaUrl(mediaId: string): Promise<{ url?: string; mimeType?: string; error?: string }> {
-  const token = process.env.META_ACCESS_TOKEN
-  if (!token) return { error: 'No META_ACCESS_TOKEN' }
+  const { token } = getMetaCredentials()
+  if (!token) return { error: 'No WHATSAPP_ACCESS_TOKEN' }
 
   try {
     const res = await axios.get(`${META_BASE_URL}/${mediaId}`, {
