@@ -19,6 +19,11 @@ export async function GET(request: Request) {
       query = query.eq('status', statusFilter)
     }
 
+    const limit = searchParams.get('limit') ? parseInt(searchParams.get('limit')!, 10) : undefined
+    if (limit && limit > 0) {
+      query = query.limit(limit)
+    }
+
     if (countOnly) {
       const { count, error } = await query
       if (error) throw error
