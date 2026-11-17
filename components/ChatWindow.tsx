@@ -208,59 +208,62 @@ export default function ChatWindow({
   const phone = conversation?.phone_number || ''
 
   return (
-    <div className="flex flex-col h-full bg-[#EFEAE2] dark:bg-[#0B141A] relative select-none">
+    <div className="flex flex-col h-full w-full bg-[#EFEAE2] dark:bg-[#0B141A] relative select-none overflow-x-hidden">
       {/* ── 1. Top Header ── */}
-      <div className="flex items-center justify-between px-4 py-2.5 bg-background border-b border-border z-10">
-        <div className="flex items-center gap-3">
+      <div className="flex items-center justify-between px-3 sm:px-4 py-2 sm:py-2.5 bg-background border-b border-border z-10 gap-2">
+        <div className="flex items-center gap-2 sm:gap-3 min-w-0">
           <Link
             href="/dashboard"
-            className="md:hidden p-1.5 -ml-1 text-muted-foreground hover:text-foreground rounded-lg"
+            className="md:hidden p-1.5 -ml-1 text-muted-foreground hover:text-foreground active:scale-95 transition-transform rounded-lg flex-shrink-0"
+            title="Back to all chats"
           >
-            <ArrowLeft className="w-5 h-5" />
+            <ArrowLeft className="w-5 h-5 text-foreground" />
           </Link>
 
-          <div className="w-10 h-10 rounded-full bg-emerald-600/20 text-emerald-600 dark:text-emerald-400 font-semibold text-xs flex items-center justify-center border border-emerald-500/20">
+          <div className="w-9 h-9 sm:w-10 sm:h-10 rounded-full bg-emerald-600/20 text-emerald-600 dark:text-emerald-400 font-semibold text-xs flex items-center justify-center border border-emerald-500/20 flex-shrink-0">
             {getInitials(displayName)}
           </div>
 
-          <div>
-            <div className="flex items-center gap-2">
-              <h2 className="font-semibold text-sm text-foreground">{displayName}</h2>
-              <span className="text-[11px] text-muted-foreground hidden sm:inline">
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-1.5">
+              <h2 className="font-semibold text-xs sm:text-sm text-foreground truncate max-w-[120px] sm:max-w-[220px]">
+                {displayName}
+              </h2>
+              <span className="text-[10px] sm:text-[11px] text-muted-foreground hidden lg:inline">
                 {formatPhone(phone)}
               </span>
             </div>
-            <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-              <span className="w-2 h-2 rounded-full bg-emerald-500 inline-block" />
-              <span>WhatsApp Active</span>
+            <div className="flex items-center gap-1 text-[10px] sm:text-xs text-muted-foreground">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 inline-block flex-shrink-0" />
+              <span className="truncate">WhatsApp Active</span>
             </div>
           </div>
         </div>
 
         {/* Action Buttons & AI Toggle */}
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1.5 sm:gap-2 flex-shrink-0">
           {/* Quick Simulate Button */}
           <button
             onClick={() => setIsSimulateOpen(true)}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-full bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20 transition-colors shadow-sm"
+            className="flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold rounded-full bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20 transition-colors shadow-sm"
             title="Simulate incoming WhatsApp message for this patient"
           >
             <Sparkles className="w-3.5 h-3.5 text-emerald-500" />
-            <span className="hidden sm:inline">Simulate Patient</span>
+            <span className="hidden md:inline">Simulate</span>
           </button>
 
           {/* AI Mode vs Human Receptionist Mode Toggle */}
-          <div className="flex items-center gap-3 bg-muted/50 px-3 py-1.5 rounded-full border border-border">
-            <div className="flex items-center gap-1.5 text-xs font-medium">
+          <div className="flex items-center gap-1.5 sm:gap-2 bg-muted/60 px-2 sm:px-3 py-1 sm:py-1.5 rounded-full border border-border">
+            <div className="flex items-center gap-1 text-xs font-medium">
               {aiMode ? (
                 <span className="flex items-center gap-1 text-emerald-600 dark:text-emerald-400">
-                  <Bot className="w-4 h-4" />
-                  <span className="hidden sm:inline">AI Auto-Reply</span>
+                  <Bot className="w-3.5 h-3.5" />
+                  <span className="hidden sm:inline text-xs">AI Mode</span>
                 </span>
               ) : (
                 <span className="flex items-center gap-1 text-blue-600 dark:text-blue-400">
-                  <User className="w-4 h-4" />
-                  <span className="hidden sm:inline">Human Mode</span>
+                  <User className="w-3.5 h-3.5" />
+                  <span className="hidden sm:inline text-xs">Human</span>
                 </span>
               )}
             </div>
@@ -268,7 +271,7 @@ export default function ChatWindow({
             <Switch
               checked={aiMode}
               onCheckedChange={handleToggle}
-              className="data-[state=checked]:bg-emerald-600"
+              className="data-[state=checked]:bg-emerald-600 scale-90 sm:scale-100"
               aria-label="Toggle AI or Human mode"
             />
           </div>
@@ -374,10 +377,10 @@ export default function ChatWindow({
               </button>
             </div>
 
-            <form onSubmit={handleSendAsPatient} className="flex items-center gap-2">
-              <div className="flex items-center gap-1 text-muted-foreground flex-shrink-0">
+            <form onSubmit={handleSendAsPatient} className="flex items-center gap-1.5 sm:gap-2">
+              <div className="hidden sm:flex items-center gap-1 text-muted-foreground flex-shrink-0">
                 <span className="px-2 py-1 rounded text-[10px] font-semibold bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20">
-                  Patient Mode
+                  Patient
                 </span>
               </div>
 
@@ -385,15 +388,15 @@ export default function ChatWindow({
                 type="text"
                 value={patientInput}
                 onChange={(e) => setPatientInput(e.target.value)}
-                placeholder="Ask about dental issues, timings, fees, or book an appointment..."
-                className="flex-1 px-4 py-2 text-xs rounded-xl bg-muted/60 border border-transparent focus:border-emerald-500 focus:bg-background focus:outline-none transition-all placeholder:text-muted-foreground"
+                placeholder="Ask about dental issues, timings, fees, or book..."
+                className="flex-1 min-w-0 px-3 sm:px-4 py-2 text-xs rounded-xl bg-muted/60 border border-transparent focus:border-emerald-500 focus:bg-background focus:outline-none transition-all placeholder:text-muted-foreground"
                 disabled={simulating}
               />
 
               <button
                 type="submit"
                 disabled={!patientInput.trim() || simulating}
-                className="px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-40 text-white text-xs font-semibold flex items-center gap-1.5 transition-colors shadow-sm flex-shrink-0"
+                className="px-3 sm:px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-40 text-white text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors shadow-sm flex-shrink-0"
                 title="Send message as patient to AI"
               >
                 {simulating ? (
@@ -404,17 +407,18 @@ export default function ChatWindow({
                 ) : (
                   <>
                     <Send className="w-3.5 h-3.5" />
-                    <span>Send as Patient</span>
+                    <span className="hidden sm:inline">Send as Patient</span>
+                    <span className="sm:hidden">Send</span>
                   </>
                 )}
               </button>
             </form>
           </div>
         ) : (
-          <form onSubmit={handleSend} className="flex items-center gap-2">
-            <div className="flex items-center gap-1 text-muted-foreground">
+          <form onSubmit={handleSend} className="flex items-center gap-1.5 sm:gap-2">
+            <div className="hidden sm:flex items-center gap-1 text-muted-foreground flex-shrink-0">
               <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-blue-500/10 text-blue-500">
-                Human Mode
+                Human
               </span>
             </div>
 
@@ -423,14 +427,14 @@ export default function ChatWindow({
               value={inputText}
               onChange={(e) => setInputText(e.target.value)}
               placeholder="Type a WhatsApp reply as dental receptionist..."
-              className="flex-1 px-4 py-2 text-xs rounded-xl bg-muted/60 border border-transparent focus:border-emerald-500 focus:bg-background focus:outline-none transition-all"
+              className="flex-1 min-w-0 px-3 sm:px-4 py-2 text-xs rounded-xl bg-muted/60 border border-transparent focus:border-emerald-500 focus:bg-background focus:outline-none transition-all"
               disabled={sending}
             />
 
             <button
               type="submit"
               disabled={!inputText.trim() || sending}
-              className="p-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-40 text-white font-medium transition-colors shadow-sm"
+              className="p-2 sm:p-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-40 text-white font-medium transition-colors shadow-sm flex-shrink-0"
               title="Send WhatsApp message"
             >
               {sending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}

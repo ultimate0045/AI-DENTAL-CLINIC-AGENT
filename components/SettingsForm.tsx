@@ -1,6 +1,7 @@
 'use client'
 
 import React, { useState, useEffect, useCallback } from 'react'
+import Link from 'next/link'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { cn } from '@/lib/utils'
@@ -10,7 +11,7 @@ import * as Dialog from '@radix-ui/react-dialog'
 import {
   Plus, Trash2, CheckCircle2, XCircle, Loader2,
   Upload, FileText, AlertCircle, Info, Clock,
-  Link2, Settings2, Eye, EyeOff, Copy, Check, ShieldCheck, Key, RefreshCw
+  Link2, Settings2, Eye, EyeOff, Copy, Check, ShieldCheck, Key, RefreshCw, ArrowLeft
 } from 'lucide-react'
 
 // ─── Local sub-types ────────────────────────────────────────────────────────
@@ -436,8 +437,8 @@ export function SettingsForm({ initialSettings, onSave }: SettingsFormProps) {
   // ── UI ────────────────────────────────────────────────────────────────────────
   const tabCls = (val: string) =>
     cn(
-      'px-4 py-2 text-sm font-medium rounded-md transition-colors cursor-pointer',
-      'data-[state=active]:bg-[#25D366] data-[state=active]:text-white',
+      'px-3 sm:px-4 py-1.5 sm:py-2 text-xs sm:text-sm font-medium rounded-lg transition-colors cursor-pointer whitespace-nowrap flex-shrink-0',
+      'data-[state=active]:bg-[#25D366] data-[state=active]:text-white shadow-sm',
       'data-[state=inactive]:text-gray-600 data-[state=inactive]:hover:bg-gray-100',
       'dark:data-[state=inactive]:text-gray-300 dark:data-[state=inactive]:hover:bg-[#2A3942]'
     )
@@ -446,7 +447,7 @@ export function SettingsForm({ initialSettings, onSave }: SettingsFormProps) {
     cn('w-full', err && 'border-red-400 focus:ring-red-400')
 
   return (
-    <div className="relative">
+    <div className="relative w-full overflow-x-hidden">
       <ToastContainer toasts={toasts} />
       <ConfirmDialog
         open={setupDialogOpen}
@@ -457,36 +458,47 @@ export function SettingsForm({ initialSettings, onSave }: SettingsFormProps) {
       />
 
       {/* Header */}
-      <div className="flex items-center justify-between mb-6">
-        <div className="flex items-center gap-3">
-          <Settings2 className="h-6 w-6 text-[#25D366]" />
-          <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">⚙️ Clinic Settings</h1>
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-6">
+        <div className="flex items-center gap-2.5">
+          <Link
+            href="/dashboard"
+            className="md:hidden p-1.5 -ml-1 text-muted-foreground hover:text-foreground rounded-lg"
+            title="Back to dashboard"
+          >
+            <ArrowLeft className="w-5 h-5" />
+          </Link>
+          <Settings2 className="h-6 w-6 text-[#25D366] flex-shrink-0" />
+          <h1 className="text-xl sm:text-2xl font-bold text-gray-900 dark:text-gray-100 truncate">
+            ⚙️ Clinic Settings
+          </h1>
           {isDirty && (
-            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400">
+            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400 flex-shrink-0">
               <span className="h-1.5 w-1.5 rounded-full bg-amber-500 animate-pulse" />
-              Unsaved changes
+              Unsaved
             </span>
           )}
         </div>
-        <Button onClick={handleSave} loading={isSaving} disabled={isSaving} className="min-w-32">
+        <Button onClick={handleSave} loading={isSaving} disabled={isSaving} className="w-full sm:w-auto min-w-32 rounded-xl">
           {isSaving ? 'Saving…' : 'Save Settings'}
         </Button>
       </div>
 
       {/* Tabs */}
       <Tabs.Root value={activeTab} onValueChange={setActiveTab}>
-        <Tabs.List className="flex gap-1 p-1 bg-gray-100 dark:bg-[#2A3942] rounded-lg mb-6 w-fit">
-          {[
-            { val: 'clinic', label: 'Clinic Info' },
-            { val: 'services', label: 'Services & Pricing' },
-            { val: 'integrations', label: 'Integrations' },
-            { val: 'ai', label: 'AI & Knowledge Base' },
-          ].map(t => (
-            <Tabs.Trigger key={t.val} value={t.val} className={tabCls(t.val)}>
-              {t.label}
-            </Tabs.Trigger>
-          ))}
-        </Tabs.List>
+        <div className="overflow-x-auto no-scrollbar -mx-1 px-1 mb-6">
+          <Tabs.List className="flex gap-1.5 p-1 bg-gray-100 dark:bg-[#2A3942] rounded-xl w-max min-w-full sm:min-w-0">
+            {[
+              { val: 'clinic', label: 'Clinic Info' },
+              { val: 'services', label: 'Services & Pricing' },
+              { val: 'integrations', label: 'Integrations' },
+              { val: 'ai', label: 'AI & Knowledge Base' },
+            ].map(t => (
+              <Tabs.Trigger key={t.val} value={t.val} className={tabCls(t.val)}>
+                {t.label}
+              </Tabs.Trigger>
+            ))}
+          </Tabs.List>
+        </div>
 
         {/* ── Tab 1: Clinic Info ─────────────────────────────────────────────── */}
         <Tabs.Content value="clinic" className="space-y-5">

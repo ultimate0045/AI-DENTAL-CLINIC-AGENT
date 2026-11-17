@@ -81,42 +81,42 @@ export default function DashboardPage() {
       : 'https://calendar.google.com/calendar/r'
 
   return (
-    <div className="flex-1 h-full overflow-y-auto bg-[#F8FAFC] dark:bg-[#0B141A] flex flex-col items-center justify-start p-6 md:p-8 select-none">
-      <div className="max-w-3xl w-full space-y-6">
+    <div className="flex-1 h-full w-full overflow-y-auto overflow-x-hidden bg-[#F8FAFC] dark:bg-[#0B141A] flex flex-col items-center justify-start p-3.5 sm:p-6 md:p-8 select-none">
+      <div className="max-w-3xl w-full space-y-4 sm:space-y-6">
         {/* ── Top Clinic Header ── */}
-        <div className="text-center space-y-3">
+        <div className="text-center space-y-2.5 sm:space-y-3">
           <div className="relative inline-block mx-auto">
-            <div className="w-16 h-16 rounded-2xl bg-emerald-600/15 text-emerald-600 dark:text-emerald-400 flex items-center justify-center mx-auto shadow-inner border border-emerald-500/20">
-              <Stethoscope className="w-8 h-8 text-emerald-500" />
+            <div className="w-14 h-14 sm:w-16 sm:h-16 rounded-2xl bg-emerald-600/15 text-emerald-600 dark:text-emerald-400 flex items-center justify-center mx-auto shadow-inner border border-emerald-500/20">
+              <Stethoscope className="w-7 h-7 sm:w-8 sm:h-8 text-emerald-500" />
             </div>
-            <div className="absolute -bottom-1 -right-1 w-6 h-6 rounded-full bg-emerald-600 text-white flex items-center justify-center shadow">
-              <Bot className="w-3.5 h-3.5" />
+            <div className="absolute -bottom-1 -right-1 w-5 h-5 sm:w-6 sm:h-6 rounded-full bg-emerald-600 text-white flex items-center justify-center shadow">
+              <Bot className="w-3 h-3 sm:w-3.5 sm:h-3.5" />
             </div>
           </div>
 
           <div>
-            <h1 className="text-xl md:text-2xl font-bold text-foreground tracking-tight">
+            <h1 className="text-lg sm:text-2xl font-bold text-foreground tracking-tight px-2">
               {settings?.clinicName ? `${settings.clinicName} — AI Control Panel` : 'WhatsApp AI Dental Receptionist'}
             </h1>
-            <p className="text-xs text-muted-foreground max-w-md mx-auto mt-1 leading-relaxed">
+            <p className="text-[11px] sm:text-xs text-muted-foreground max-w-md mx-auto mt-1 leading-relaxed px-2">
               Your 24/7 autonomous receptionist handling patient inquiries, checking dental timings, and booking appointments into Google Calendar.
             </p>
           </div>
 
           {/* 2 Clean Quick Action Buttons */}
-          <div className="flex items-center justify-center gap-3 pt-1">
+          <div className="flex flex-wrap items-center justify-center gap-2 sm:gap-3 pt-1">
             <Button
               onClick={() => setIsSimulateOpen(true)}
-              className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs gap-1.5 shadow-sm rounded-xl px-4"
+              className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs gap-1.5 shadow-sm rounded-xl px-3.5 sm:px-4 py-2"
             >
               <Sparkles className="w-3.5 h-3.5" />
-              Test Bot (Simulate Chat)
+              <span>Test Bot (Simulate)</span>
             </Button>
 
             <Link href="/dashboard/settings">
-              <Button variant="outline" className="text-xs gap-1.5 border-border shadow-sm rounded-xl px-4">
+              <Button variant="outline" className="text-xs gap-1.5 border-border shadow-sm rounded-xl px-3.5 sm:px-4 py-2">
                 <Settings className="w-3.5 h-3.5" />
-                Clinic Settings
+                <span>Clinic Settings</span>
               </Button>
             </Link>
           </div>
@@ -227,36 +227,36 @@ export default function DashboardPage() {
                   return (
                     <div
                       key={appt.id}
-                      className="p-3.5 px-4 flex items-center justify-between gap-3 hover:bg-muted/30 transition-colors"
+                      className="p-3 sm:p-3.5 px-3 sm:px-4 flex items-center justify-between gap-2 sm:gap-3 hover:bg-muted/30 transition-colors"
                     >
                       {/* Left: Patient info + issue */}
-                      <div className="min-w-0 flex items-center gap-3">
-                        <div className="w-8 h-8 rounded-full bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 text-xs font-semibold flex items-center justify-center flex-shrink-0">
-                          <User className="w-4 h-4" />
+                      <div className="min-w-0 flex items-center gap-2.5 sm:gap-3">
+                        <div className="w-7 h-7 sm:w-8 sm:h-8 rounded-full bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 text-xs font-semibold flex items-center justify-center flex-shrink-0">
+                          <User className="w-3.5 h-3.5" />
                         </div>
                         <div className="min-w-0">
-                          <div className="flex items-center gap-2">
-                            <span className="font-semibold text-xs text-foreground truncate">
+                          <div className="flex items-center gap-1.5">
+                            <span className="font-semibold text-xs text-foreground truncate max-w-[90px] sm:max-w-none">
                               {appt.patient_name}
                             </span>
-                            <span className="text-[10px] font-mono text-muted-foreground px-1.5 py-0.2 rounded bg-muted">
+                            <span className="text-[9px] sm:text-[10px] font-mono text-muted-foreground px-1.5 py-0.2 rounded bg-muted flex-shrink-0">
                               {appt.booking_id}
                             </span>
                           </div>
-                          <p className="text-[11px] text-muted-foreground truncate mt-0.5">
+                          <p className="text-[10px] sm:text-[11px] text-muted-foreground truncate mt-0.5 max-w-[130px] sm:max-w-none">
                             {cleanIssue}
                           </p>
                         </div>
                       </div>
 
                       {/* Right: Date, Time & Chat link */}
-                      <div className="flex items-center gap-3 flex-shrink-0 text-right">
+                      <div className="flex items-center gap-2 sm:gap-3 flex-shrink-0 text-right">
                         <div>
                           <div className="flex items-center gap-1 justify-end font-semibold text-xs text-foreground">
                             <Clock className="w-3 h-3 text-emerald-500" />
                             <span>{appt.time_slot}</span>
                           </div>
-                          <p className="text-[10px] text-muted-foreground mt-0.5">
+                          <p className="text-[9px] sm:text-[10px] text-muted-foreground mt-0.5">
                             {appt.appointment_date}{weekday ? ` (${weekday.slice(0, 3)})` : ''}
                           </p>
                         </div>

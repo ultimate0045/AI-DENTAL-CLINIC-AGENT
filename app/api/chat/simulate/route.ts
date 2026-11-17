@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server'
 import { createAdminClient } from '@/lib/supabase'
 import { processWithGemini } from '@/lib/gemini'
+import { normalizePhone } from '@/lib/utils'
 
 export const dynamic = 'force-dynamic'
 
@@ -8,7 +9,8 @@ export async function POST(request: Request) {
   try {
     const body = await request.json()
     const { message, patientName = 'Rahul Sharma', conversationId } = body
-    let phone = (body.phone || '+919876543210').trim()
+    let rawPhone = (body.phone || '919876543210').trim()
+    let phone = normalizePhone(rawPhone) || '919876543210'
 
     if (!message || typeof message !== 'string' || !message.trim()) {
       return NextResponse.json(
@@ -19,7 +21,7 @@ export async function POST(request: Request) {
 
     const supabase = createAdminClient()
 
-    // 1. Get or create conversation thread
+    // 1. Get or upsert single continuous conversation thread per normalized phone number
     let conv: any = null
 
     if (conversationId) {
@@ -31,16 +33,18 @@ export async function POST(request: Request) {
 
       if (!error && data) {
         conv = data
-        phone = data.phone_number
+        phone = normalizePhone(data.phone_number) || phone
       }
     }
 
     if (!conv) {
-      // Look up by phone number
+      // Look up by normalized phone or legacy format
       const { data, error } = await supabase
         .from('conversations')
         .select('*')
-        .eq('phone_number', phone)
+        .or(`phone_number.eq.${phone},phone_number.eq.+${phone}`)
+        .order('created_at', { ascending: true })
+        .limit(1)
         .maybeSingle()
 
       if (!error && data) {
@@ -49,17 +53,17 @@ export async function POST(request: Request) {
     }
 
     if (!conv) {
-      // Create new conversation
+      // Upsert using onConflict to ensure single unified thread
       const { data: newConv, error: createErr } = await supabase
         .from('conversations')
-        .insert({
+        .upsert({
           phone_number: phone,
           patient_name: patientName,
           ai_mode: true,
           last_message: message.trim(),
           last_message_at: new Date().toISOString(),
           unread_count: 0,
-        })
+        }, { onConflict: 'phone_number' })
         .select()
         .single()
 
@@ -68,14 +72,22 @@ export async function POST(request: Request) {
       }
       conv = newConv
     } else {
-      // Update patient name if empty
-      if (!conv.patient_name && patientName) {
-        await supabase
-          .from('conversations')
-          .update({ patient_name: patientName })
-          .eq('id', conv.id)
-        conv.patient_name = patientName
+      // Update phone_number to normalized digits-only and update patient name / last message
+      const updates: any = {
+        phone_number: phone,
+        last_message: message.trim(),
+        last_message_at: new Date().toISOString(),
       }
+      if (patientName && (!conv.patient_name || conv.patient_name === 'Patient' || conv.patient_name === 'Rahul Sharma')) {
+        updates.patient_name = patientName
+      }
+      const { data: updatedConv } = await supabase
+        .from('conversations')
+        .update(updates)
+        .eq('id', conv.id)
+        .select()
+        .single()
+      if (updatedConv) conv = updatedConv
     }
 
     // 2. Save user message into chat_messages

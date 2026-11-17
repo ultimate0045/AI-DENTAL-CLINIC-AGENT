@@ -17,7 +17,7 @@ import {
   ChevronRight,
 } from 'lucide-react'
 import { useTheme } from '@/hooks/useTheme'
-import { getInitials, formatRelativeTime, formatPhone, truncateText } from '@/lib/utils'
+import { getInitials, formatRelativeTime, formatPhone, truncateText, cn } from '@/lib/utils'
 import { supabase } from '@/lib/supabase'
 import SimulateModal from '@/components/SimulateModal'
 
@@ -35,12 +35,14 @@ interface SidebarProps {
   conversations?: SidebarConversation[]
   onSelectConversation?: (id: string) => void
   clinicName?: string
+  className?: string
 }
 
 export default function Sidebar({
   conversations: propConversations,
   onSelectConversation,
   clinicName = 'Dental Receptionist',
+  className,
 }: SidebarProps) {
   const pathname = usePathname()
   const router = useRouter()
@@ -90,7 +92,7 @@ export default function Sidebar({
   })
 
   return (
-    <aside className="flex flex-col h-full w-80 md:w-88 border-r border-border bg-card select-none">
+    <aside className={cn("flex flex-col h-full w-full md:w-88 border-r border-border bg-card select-none flex-shrink-0", className)}>
       {/* 1. Header with clinic branding */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-border bg-muted/30">
         <div className="flex items-center gap-2.5">

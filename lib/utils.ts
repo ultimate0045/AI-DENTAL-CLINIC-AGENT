@@ -70,14 +70,37 @@ export function getInitials(name: string): string {
     .slice(0, 2)
 }
 
+export function normalizePhone(rawPhone?: string | null): string {
+  if (!rawPhone) return ''
+  let digits = String(rawPhone).replace(/\D/g, '')
+  if (!digits) return ''
+
+  // 10-digit local number (default country code: 91 India)
+  if (digits.length === 10) {
+    return `91${digits}`
+  }
+
+  // 11 digits starting with 0 (e.g. 09876543210)
+  if (digits.length === 11 && digits.startsWith('0')) {
+    return `91${digits.slice(1)}`
+  }
+
+  // International starting with double zero (0091...)
+  if (digits.startsWith('00')) {
+    digits = digits.slice(2)
+  }
+
+  return digits
+}
+
 export function formatPhone(phone: string): string {
   if (!phone) return ''
-  // E.g. +919876543210 -> +91 98765 43210
-  const clean = phone.replace(/\s+/g, '')
-  if (clean.length === 13 && clean.startsWith('+')) {
-    return `${clean.slice(0, 3)} ${clean.slice(3, 8)} ${clean.slice(8)}`
+  const normalized = normalizePhone(phone)
+  if (normalized.length === 12 && normalized.startsWith('91')) {
+    return `+91 ${normalized.slice(2, 7)} ${normalized.slice(7)}`
   }
-  return clean
+  if (phone.startsWith('+')) return phone
+  return normalized ? `+${normalized}` : ''
 }
 
 export function isValidTime(time: string): boolean {

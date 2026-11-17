@@ -442,10 +442,91 @@ async function getMetaPhoneNumberId() {
   return settings.meta_phone_number_id || process.env.META_PHONE_NUMBER_ID || process.env.WHATSAPP_PHONE_NUMBER_ID || '';
 }
 
+// ─── Canonical Phone Normalization & Unified Conversation Thread ───────────
+function normalizePhoneNumber(rawPhone) {
+  if (!rawPhone) return '';
+  let digits = String(rawPhone).replace(/\D/g, '');
+  if (!digits) return '';
+  if (digits.length === 10) {
+    digits = `91${digits}`;
+  } else if (digits.length === 11 && digits.startsWith('0')) {
+    digits = `91${digits.slice(1)}`;
+  } else if (digits.startsWith('00')) {
+    digits = digits.slice(2);
+  }
+  return digits;
+}
+
+async function getOrCreateConversation(phoneInput, patientNameInput, lastMessageText, isAIMode = true) {
+  const normPhone = normalizePhoneNumber(phoneInput);
+  if (!normPhone) return null;
+
+  try {
+    // 1. Look up by normalized digits or legacy format (+91...)
+    const { data: existing } = await supabase
+      .from('conversations')
+      .select('*')
+      .or(`phone_number.eq.${normPhone},phone_number.eq.+${normPhone}`)
+      .order('created_at', { ascending: true })
+      .limit(1)
+      .maybeSingle();
+
+    if (existing) {
+      const updates = {
+        phone_number: normPhone, // Ensure legacy number is updated to normalized digits
+        last_message: lastMessageText || existing.last_message,
+        last_message_at: new Date().toISOString(),
+      };
+      if (patientNameInput && (!existing.patient_name || existing.patient_name === 'Patient' || existing.patient_name === 'Rahul Sharma')) {
+        updates.patient_name = patientNameInput;
+      }
+      const { data: updated } = await supabase
+        .from('conversations')
+        .update(updates)
+        .eq('id', existing.id)
+        .select()
+        .single();
+      return updated || existing;
+    }
+
+    // 2. Upsert using onConflict: 'phone_number' to guarantee NO duplicate rows ever
+    const { data: upserted, error: upsertErr } = await supabase
+      .from('conversations')
+      .upsert(
+        {
+          phone_number: normPhone,
+          patient_name: patientNameInput || '',
+          last_message: lastMessageText || '',
+          last_message_at: new Date().toISOString(),
+          ai_mode: isAIMode,
+          unread_count: 1,
+        },
+        { onConflict: 'phone_number' }
+      )
+      .select()
+      .single();
+
+    if (upsertErr) {
+      console.warn('[getOrCreateConversation upsert warning]:', upsertErr.message);
+      const { data: fallback } = await supabase
+        .from('conversations')
+        .select('*')
+        .eq('phone_number', normPhone)
+        .maybeSingle();
+      return fallback;
+    }
+    return upserted;
+  } catch (err) {
+    console.error('[getOrCreateConversation error]:', err.message);
+    return null;
+  }
+}
+
 // ─── Helper: Send WhatsApp Message ───────────────────────────────────────────
 async function sendWhatsAppMessage(phone, text) {
   try {
     const messageBody = text ? text.trim() : '';
+    const cleanPhone = normalizePhoneNumber(phone);
     const phoneId = await getMetaPhoneNumberId();
     const token = await getMetaAccessToken();
     const url = `${META_GRAPH_URL}/${phoneId}/messages`;
@@ -454,7 +535,7 @@ async function sendWhatsAppMessage(phone, text) {
       {
         messaging_product: 'whatsapp',
         recipient_type: 'individual',
-        to: phone,
+        to: cleanPhone,
         type: 'text',
         text: { preview_url: false, body: messageBody },
       },
@@ -2247,7 +2328,7 @@ app.post(['/webhook', '/api/webhook'], async (req, res) => {
     const rawMessage = value.messages[0];
     const message_id = rawMessage.id;
     const rawFrom = rawMessage.from; // sender's phone number e.g. "919876543210"
-    const from = rawFrom ? (rawFrom.startsWith('+') ? rawFrom : `+${rawFrom}`) : '';
+    const from = normalizePhoneNumber(rawFrom);
     const type = rawMessage.type; // text | image | audio | interactive ...
     const contactName = value.contacts?.[0]?.profile?.name || '';
 
@@ -2352,45 +2433,15 @@ app.post(['/webhook', '/api/webhook'], async (req, res) => {
       // Background tracking to DB and Socket (Non-blocking)
       (async () => {
         try {
-          let convId;
-          const { data: existingConv } = await supabase
-            .from('conversations')
-            .select('id, patient_name')
-            .eq('phone_number', from)
-            .maybeSingle();
-
-          if (existingConv) {
-            convId = existingConv.id;
-            await supabase
-              .from('conversations')
-              .update({
-                last_message: fastGreeting,
-                last_message_at: new Date().toISOString(),
-                ...(contactName && !existingConv.patient_name ? { patient_name: contactName } : {}),
-              })
-              .eq('id', convId);
-          } else {
-            const { data: newConv } = await supabase
-              .from('conversations')
-              .insert({
-                phone_number: from,
-                patient_name: contactName,
-                last_message: fastGreeting,
-                last_message_at: new Date().toISOString(),
-                ai_mode: true,
-                unread_count: 1,
-              })
-              .select('id')
-              .single();
-            convId = newConv?.id;
-          }
+          const conv = await getOrCreateConversation(from, contactName, fastGreeting, true);
+          const convId = conv?.id;
 
           if (convId) {
-            let state = conversationStateMap.get(convId);
+            let state = conversationStateMap.get(convId) || conversationStateMap.get(from);
             if (!state) {
               state = {
                 patient_name: contactName || null,
-                patient_phone: null,
+                patient_phone: from,
                 visit_type: null,
                 dental_issue: null,
                 date: null,
@@ -2443,44 +2494,8 @@ app.post(['/webhook', '/api/webhook'], async (req, res) => {
     }
 
     // ── 2. NON-GREETING or SUBSEQUENT MESSAGES: Contextual Gemini Flow ──
-    let conversationId;
-    const { data: existingConv } = await supabase
-      .from('conversations')
-      .select('id, ai_mode, patient_name')
-      .eq('phone_number', from)
-      .maybeSingle();
-
-    if (existingConv) {
-      conversationId = existingConv.id;
-      Promise.resolve(supabase
-        .from('conversations')
-        .update({
-          last_message: messageText,
-          last_message_at: new Date().toISOString(),
-          ...(contactName && !existingConv.patient_name ? { patient_name: contactName } : {}),
-        })
-        .eq('id', conversationId)).catch(() => {});
-    } else {
-      const { data: newConv, error: convErr } = await supabase
-        .from('conversations')
-        .insert({
-          phone_number: from,
-          patient_name: contactName,
-          last_message: messageText,
-          last_message_at: new Date().toISOString(),
-          ai_mode: true,
-          unread_count: 1,
-        })
-        .select()
-        .single();
-
-      if (convErr || !newConv) {
-        console.warn('⚠️ [Webhook] Create conversation warning, using in-memory ID:', convErr?.message);
-        conversationId = `temp-${from}`;
-      } else {
-        conversationId = newConv.id;
-      }
-    }
+    const conv = await getOrCreateConversation(from, contactName, messageText, true);
+    const conversationId = conv?.id || `temp-${from}`;
 
     // Save incoming user message in background
     Promise.resolve(supabase.from('chat_messages').insert({
@@ -2751,7 +2766,8 @@ app.post('/api/send-message', async (req, res) => {
 app.post('/api/chat/simulate', async (req, res) => {
   try {
     const { message, patientName = 'Rahul Sharma', conversationId } = req.body;
-    let phone = (req.body.phone || '+919876543210').trim();
+    let rawPhone = (req.body.phone || '919876543210').trim();
+    let phone = normalizePhoneNumber(rawPhone) || '919876543210';
 
     if (!message || !message.trim()) {
       return res.status(400).json({ error: 'message is required' });
@@ -2762,30 +2778,26 @@ app.post('/api/chat/simulate', async (req, res) => {
       const { data } = await supabase.from('conversations').select('*').eq('id', conversationId).maybeSingle();
       if (data) {
         conv = data;
-        phone = data.phone_number;
+        phone = normalizePhoneNumber(data.phone_number) || phone;
       }
     }
 
     if (!conv) {
-      const { data } = await supabase.from('conversations').select('*').eq('phone_number', phone).maybeSingle();
-      if (data) conv = data;
+      conv = await getOrCreateConversation(phone, patientName, message.trim(), true);
+    } else {
+      await supabase
+        .from('conversations')
+        .update({
+          phone_number: phone,
+          last_message: message.trim(),
+          last_message_at: new Date().toISOString(),
+          ...(patientName && (!conv.patient_name || conv.patient_name === 'Patient' || conv.patient_name === 'Rahul Sharma') ? { patient_name: patientName } : {}),
+        })
+        .eq('id', conv.id);
     }
 
     if (!conv) {
-      const { data: newConv, error: err } = await supabase
-        .from('conversations')
-        .insert({
-          phone_number: phone,
-          patient_name: patientName,
-          ai_mode: true,
-          last_message: message.trim(),
-          last_message_at: new Date().toISOString(),
-          unread_count: 0,
-        })
-        .select()
-        .single();
-      if (err) throw err;
-      conv = newConv;
+      return res.status(500).json({ error: 'Failed to find or create conversation thread' });
     }
 
     const userMsgRecord = {

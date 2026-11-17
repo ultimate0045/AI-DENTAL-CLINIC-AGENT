@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server'
 import { createAdminClient } from '@/lib/supabase'
 import { processWithGemini } from '@/lib/gemini'
 import { sendTextMessage, markMessageAsRead } from '@/lib/metaWhatsapp'
+import { normalizePhone } from '@/lib/utils'
 
 export const dynamic = 'force-dynamic'
 
@@ -59,11 +60,11 @@ export async function POST(request: Request) {
     const rawMessage = value.messages[0]
     const messageId = rawMessage.id
     const fromPhone = rawMessage.from // E.164 without plus e.g. 919876543210
-    const formattedPhone = fromPhone ? (fromPhone.startsWith('+') ? fromPhone : `+${fromPhone}`) : ''
+    const normalizedPhone = normalizePhone(fromPhone)
     const messageType = rawMessage.type
     const contactName = value.contacts?.[0]?.profile?.name || ''
 
-    if (!messageId || !formattedPhone) {
+    if (!messageId || !normalizedPhone) {
       return NextResponse.json({ status: 'invalid_payload' }, { status: 200 })
     }
 
@@ -105,11 +106,13 @@ export async function POST(request: Request) {
     // 2. Mark as read on WhatsApp
     await markMessageAsRead(messageId).catch(() => {})
 
-    // 3. Find or create conversation
+    // 3. Find or upsert single unified conversation thread per normalized phone number
     let { data: conv } = await supabase
       .from('conversations')
       .select('*')
-      .eq('phone_number', formattedPhone)
+      .or(`phone_number.eq.${normalizedPhone},phone_number.eq.+${normalizedPhone}`)
+      .order('created_at', { ascending: true })
+      .limit(1)
       .maybeSingle()
 
     let textContent = ''
@@ -122,29 +125,37 @@ export async function POST(request: Request) {
     }
 
     if (!conv) {
+      // Upsert using onConflict: 'phone_number' to guarantee single thread per patient
       const { data: newConv } = await supabase
         .from('conversations')
-        .insert({
-          phone_number: formattedPhone,
-          patient_name: contactName,
-          ai_mode: true,
-          last_message: textContent,
-          last_message_at: new Date().toISOString(),
-          unread_count: 1,
-        })
+        .upsert(
+          {
+            phone_number: normalizedPhone,
+            patient_name: contactName || '',
+            ai_mode: true,
+            last_message: textContent,
+            last_message_at: new Date().toISOString(),
+            unread_count: 1,
+          },
+          { onConflict: 'phone_number' }
+        )
         .select()
         .single()
       conv = newConv
     } else {
-      await supabase
+      const { data: updatedConv } = await supabase
         .from('conversations')
         .update({
+          phone_number: normalizedPhone, // Normalize if legacy had '+'
           last_message: textContent,
           last_message_at: new Date().toISOString(),
           unread_count: (conv.unread_count || 0) + 1,
           ...(contactName && !conv.patient_name ? { patient_name: contactName } : {}),
         })
         .eq('id', conv.id)
+        .select()
+        .single()
+      if (updatedConv) conv = updatedConv
     }
 
     if (!conv) return NextResponse.json({ status: 'ok' }, { status: 200 })
@@ -196,7 +207,7 @@ export async function POST(request: Request) {
 
       const aiResult = await processWithGemini({
         conversationId: conv.id,
-        patientPhone: formattedPhone,
+        patientPhone: normalizedPhone,
         patientName: conv.patient_name || contactName,
         messageText: textContent,
         history: formattedHistory,
@@ -204,7 +215,7 @@ export async function POST(request: Request) {
       })
 
       // Send WhatsApp reply back to patient via Meta Cloud API
-      await sendTextMessage(formattedPhone, aiResult.replyText)
+      await sendTextMessage(normalizedPhone, aiResult.replyText)
 
       // Save AI reply into chat_messages
       await supabase.from('chat_messages').insert({

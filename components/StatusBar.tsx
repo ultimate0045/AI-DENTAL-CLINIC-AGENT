@@ -3,6 +3,7 @@
 import React, { useState, useEffect } from 'react'
 import { Badge } from '@/components/ui/badge'
 import { CheckCircle2, XCircle, RefreshCw, AlertCircle } from 'lucide-react'
+import { cn } from '@/lib/utils'
 
 interface ConnectionStatuses {
   meta: boolean
@@ -10,7 +11,7 @@ interface ConnectionStatuses {
   sheets: boolean
 }
 
-export function StatusBar() {
+export function StatusBar({ className }: { className?: string }) {
   const [statuses, setStatuses] = useState<ConnectionStatuses>({
     meta: false,
     calendar: false,
@@ -56,9 +57,9 @@ export function StatusBar() {
   }, [])
 
   return (
-    <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-2 border-b border-border bg-card/60 backdrop-blur-sm text-xs select-none">
-      <div className="flex items-center gap-3">
-        <span className="font-semibold tracking-wide uppercase text-[10px] text-muted-foreground">
+    <div className={cn("flex items-center justify-between gap-2 px-3 sm:px-4 py-1.5 sm:py-2 border-b border-border bg-card/60 backdrop-blur-sm text-[11px] sm:text-xs select-none overflow-x-auto", className)}>
+      <div className="flex items-center gap-2 sm:gap-3 flex-nowrap min-w-max">
+        <span className="font-semibold tracking-wide uppercase text-[9px] sm:text-[10px] text-muted-foreground hidden sm:inline">
           System Integrations
         </span>
 
@@ -69,7 +70,7 @@ export function StatusBar() {
           ) : (
             <span className="flex h-2 w-2 rounded-full bg-amber-500" />
           )}
-          <span className="text-muted-foreground">Meta WhatsApp:</span>
+          <span className="text-muted-foreground">WhatsApp:</span>
           <span className={`font-medium ${statuses.meta ? 'text-emerald-500' : 'text-amber-500'}`}>
             {statuses.meta ? 'Connected' : 'Standby'}
           </span>
@@ -84,7 +85,7 @@ export function StatusBar() {
           ) : (
             <span className="flex h-2 w-2 rounded-full bg-amber-500" />
           )}
-          <span className="text-muted-foreground">Google Calendar:</span>
+          <span className="text-muted-foreground">Calendar:</span>
           <span className={`font-medium ${statuses.calendar ? 'text-emerald-500' : 'text-amber-500'}`}>
             {statuses.calendar ? 'Synced' : 'Configured'}
           </span>
@@ -99,15 +100,15 @@ export function StatusBar() {
           ) : (
             <span className="flex h-2 w-2 rounded-full bg-amber-500" />
           )}
-          <span className="text-muted-foreground">Google Sheets:</span>
+          <span className="text-muted-foreground">Sheets:</span>
           <span className={`font-medium ${statuses.sheets ? 'text-emerald-500' : 'text-amber-500'}`}>
             {statuses.sheets ? 'Synced' : 'Configured'}
           </span>
         </div>
       </div>
 
-      <div className="flex items-center gap-2 text-muted-foreground">
-        {lastChecked && <span>Updated {lastChecked}</span>}
+      <div className="flex items-center gap-1.5 text-muted-foreground flex-shrink-0 text-[10px] sm:text-xs">
+        {lastChecked && <span className="hidden sm:inline">Updated {lastChecked}</span>}
         <button
           onClick={fetchStatus}
           disabled={loading}
