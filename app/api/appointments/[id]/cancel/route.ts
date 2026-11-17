@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server'
 import { createAdminClient } from '@/lib/supabase'
 import { deleteCalendarEvent } from '@/lib/googleCalendar'
+import { updateAppointmentStatusInSheet } from '@/lib/googleSheets'
 import { sendTextMessage } from '@/lib/metaWhatsapp'
 import { getExactWeekday } from '@/lib/utils'
 
@@ -33,20 +34,22 @@ export async function PATCH(
       return NextResponse.json({ success: false, error: 'Appointment not found' }, { status: 404 })
     }
 
-    // 2. Fetch clinic settings for calendar ID & clinic info
+    // 2. Fetch clinic settings for calendar ID, sheet ID & clinic info
     const { data: clinicSettings } = await supabase
       .from('clinic_settings')
-      .select('clinic_name, google_calendar_id')
+      .select('clinic_name, google_calendar_id, google_sheet_id, google_service_account_json')
       .limit(1)
       .maybeSingle()
 
     const clinicName = clinicSettings?.clinic_name || "Dr. Sharma's Dental Clinic"
     const calendarId = clinicSettings?.google_calendar_id || process.env.GOOGLE_CALENDAR_ID
+    const sheetId = clinicSettings?.google_sheet_id || process.env.GOOGLE_SHEET_ID
+    const serviceAccountJson = clinicSettings?.google_service_account_json
 
     // 3. Delete from Google Calendar if event exists
     if (appt.google_event_id && calendarId) {
       try {
-        await deleteCalendarEvent(appt.google_event_id, calendarId, appt.appointment_date)
+        await deleteCalendarEvent(appt.google_event_id, calendarId, appt.appointment_date, serviceAccountJson)
       } catch (calErr: any) {
         console.warn('[Calendar Warning] Failed to delete calendar event during cancel:', calErr?.message)
       }
@@ -64,6 +67,23 @@ export async function PATCH(
       .single()
 
     if (updateErr) throw updateErr
+
+    // 5. Update appointment status in Google Sheets
+    if (sheetId) {
+      try {
+        await updateAppointmentStatusInSheet({
+          bookingId: appt.booking_id,
+          phone: appt.patient_phone,
+          date: appt.appointment_date,
+          timeSlot: appt.time_slot,
+          status: 'Cancelled',
+          sheetId,
+          serviceAccountJson,
+        })
+      } catch (sErr: any) {
+        console.warn('[Google Sheets Warning] Failed to update status to Cancelled:', sErr?.message)
+      }
+    }
 
     // 5. Calculate programmatic weekday
     const weekday = getExactWeekday(appt.appointment_date)

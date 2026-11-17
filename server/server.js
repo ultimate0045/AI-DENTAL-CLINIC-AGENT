@@ -2725,6 +2725,230 @@ app.post('/api/conversations/:id/toggle-ai', async (req, res) => {
   }
 });
 
+// Helper to normalize appointment status
+function normalizeAppointmentStatus(rawStatus) {
+  if (!rawStatus) return 'Confirmed';
+  const s = rawStatus.toLowerCase().trim();
+  if (s.startsWith('comp')) return 'Completed';
+  if (s.startsWith('canc')) return 'Cancelled';
+  if (s.includes('not') || s.includes('no_show') || s.includes('no-show') || s.includes('noshow')) {
+    return 'Not Visited';
+  }
+  if (s.startsWith('conf') || s.startsWith('sched')) return 'Confirmed';
+  return rawStatus;
+}
+
+// Function to handle appointment status update in Express server
+async function handleAppointmentStatusUpdate(id, rawStatus, options = {}) {
+  const normalizedStatus = normalizeAppointmentStatus(rawStatus);
+  const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
+
+  let apptQuery = supabase.from('appointments').select('*');
+  if (isUuid) {
+    apptQuery = apptQuery.eq('id', id);
+  } else {
+    apptQuery = apptQuery.eq('booking_id', id);
+  }
+
+  let { data: appt, error: fetchErr } = await apptQuery.maybeSingle();
+  if (!appt) {
+    const { data: fallbackAppt } = await supabase
+      .from('appointments')
+      .select('*')
+      .or(`id.eq.${id},booking_id.eq.${id}`)
+      .maybeSingle();
+    appt = fallbackAppt;
+  }
+
+  if (fetchErr || !appt) {
+    throw new Error('Appointment not found');
+  }
+
+  const settings = await getClinicSettings();
+  const calendarId = settings?.google_calendar_id || process.env.GOOGLE_CALENDAR_ID;
+  const sheetId = settings?.google_sheet_id || process.env.GOOGLE_SHEET_ID;
+
+  // 1. Update Supabase
+  const { data: updatedAppt, error: updateErr } = await supabase
+    .from('appointments')
+    .update({
+      status: normalizedStatus,
+      updated_at: new Date().toISOString(),
+    })
+    .eq('id', appt.id)
+    .select()
+    .single();
+
+  if (updateErr) throw updateErr;
+
+  // 2. If Cancelled, delete from Google Calendar
+  let calendarDeleted = false;
+  if (normalizedStatus === 'Cancelled' && appt.google_event_id && calendarId) {
+    try {
+      const calendar = getCalendarClient(settings?.google_service_account_json);
+      await calendar.events.delete({
+        calendarId: calendarId,
+        eventId: appt.google_event_id,
+      });
+      calendarDeleted = true;
+      console.log(`✅ [Google Calendar] Deleted event ${appt.google_event_id} for cancelled booking ${appt.booking_id}`);
+    } catch (calErr) {
+      console.warn('[Google Calendar Warning] Failed to delete event on cancellation:', calErr.message);
+    }
+  }
+
+  // 3. Update Google Sheets Appointments tab
+  let sheetsUpdated = false;
+  let sheetsError = null;
+  if (sheetId) {
+    try {
+      const sheets = getSheetsClient(settings?.google_service_account_json);
+      let res;
+      try {
+        res = await sheets.spreadsheets.values.get({
+          spreadsheetId: sheetId,
+          range: 'Appointments!A:H',
+        });
+      } catch (readErr) {
+        console.warn('[Google Sheets] Appointments tab read error:', readErr.message);
+      }
+
+      const rows = res?.data?.values || [];
+      if (rows.length >= 2) {
+        const headers = rows[0] || [];
+        let statusColIdx = headers.findIndex((h) => typeof h === 'string' && h.toLowerCase().trim() === 'status');
+        if (statusColIdx === -1) statusColIdx = 6; // Col G
+
+        const targetBookingId = (appt.booking_id || '').trim().toLowerCase();
+        const targetPhoneDigits = (appt.patient_phone || '').replace(/\D/g, '').slice(-10);
+        const targetDate = (appt.appointment_date || '').trim();
+
+        let matchedRowIndex = -1;
+        for (let i = 1; i < rows.length; i++) {
+          const row = rows[i];
+          const rowBookingId = (row[0] || '').trim().toLowerCase();
+          const rowDate = (row[1] || '').trim();
+          const rowPhone = (row[4] || '').replace(/\D/g, '');
+
+          if (
+            targetBookingId &&
+            rowBookingId &&
+            (rowBookingId === targetBookingId ||
+              rowBookingId.includes(targetBookingId) ||
+              targetBookingId.includes(rowBookingId))
+          ) {
+            matchedRowIndex = i;
+            break;
+          }
+          if (targetPhoneDigits && rowPhone) {
+            const phoneMatches =
+              rowPhone.endsWith(targetPhoneDigits) || targetPhoneDigits.endsWith(rowPhone.slice(-10));
+            if (phoneMatches && (!targetDate || rowDate === targetDate)) {
+              matchedRowIndex = i;
+              break;
+            }
+          }
+        }
+
+        if (matchedRowIndex !== -1) {
+          const rowNum = matchedRowIndex + 1;
+          const colLetter = String.fromCharCode(65 + statusColIdx);
+          await sheets.spreadsheets.values.update({
+            spreadsheetId: sheetId,
+            range: `Appointments!${colLetter}${rowNum}`,
+            valueInputOption: 'USER_ENTERED',
+            requestBody: { values: [[normalizedStatus]] },
+          });
+          sheetsUpdated = true;
+          console.log(`✅ [Google Sheets] Updated status to "${normalizedStatus}" at Appointments!${colLetter}${rowNum}`);
+        } else {
+          sheetsError = 'Row not found in sheet';
+        }
+      }
+    } catch (sErr) {
+      console.warn('[Google Sheets] Failed to update status in sheet:', sErr.message);
+      sheetsError = sErr.message;
+    }
+  }
+
+  return {
+    success: true,
+    appointment: updatedAppt,
+    status: normalizedStatus,
+    calendarDeleted,
+    sheetsUpdated,
+    sheetsError,
+    message: `Status updated to ${normalizedStatus} & synced to Google Sheets.`,
+  };
+}
+
+// GET /api/appointments — List appointments
+app.get('/api/appointments', async (req, res) => {
+  try {
+    const { status, limit, conversationId, phone } = req.query;
+    let query = supabase.from('appointments').select('*');
+    if (status) query = query.eq('status', status);
+    if (conversationId) query = query.eq('conversation_id', conversationId);
+    if (phone) {
+      const clean = phone.replace(/\D/g, '').slice(-10);
+      if (clean) query = query.ilike('patient_phone', `%${clean}%`);
+    }
+
+    const maxLimit = limit ? parseInt(limit, 10) : 50;
+    query = query.order('appointment_date', { ascending: true }).limit(maxLimit);
+
+    const { data, error } = await query;
+    if (error) throw error;
+    res.json({ success: true, appointments: data || [] });
+  } catch (err) {
+    console.error('[/api/appointments GET]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// PATCH /api/appointments/:id/status — Update appointment status and sync to Sheets + Calendar
+app.patch(['/api/appointments/:id/status', '/api/appointments/:id/complete', '/api/appointments/:id/cancel'], async (req, res) => {
+  try {
+    const { id } = req.params;
+    let status = req.body?.status;
+    if (req.path.includes('/complete')) status = 'Completed';
+    if (req.path.includes('/cancel')) status = 'Cancelled';
+
+    const result = await handleAppointmentStatusUpdate(id, status, req.body || {});
+    res.json(result);
+  } catch (err) {
+    console.error('[/api/appointments/:id/status PATCH]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/appointments/:id/status
+app.post('/api/appointments/:id/status', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const status = req.body?.status || 'Completed';
+    const result = await handleAppointmentStatusUpdate(id, status, req.body || {});
+    res.json(result);
+  } catch (err) {
+    console.error('[/api/appointments/:id/status POST]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// PATCH /api/appointments/status — Body based
+app.patch('/api/appointments/status', async (req, res) => {
+  try {
+    const { id, appointmentId, bookingId, status } = req.body || {};
+    const targetId = id || appointmentId || bookingId;
+    if (!targetId) return res.status(400).json({ error: 'Appointment ID required' });
+    const result = await handleAppointmentStatusUpdate(targetId, status || 'Completed', req.body || {});
+    res.json(result);
+  } catch (err) {
+    console.error('[/api/appointments/status PATCH]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // POST /api/send-message — Human receptionist sends a message
 app.post('/api/send-message', async (req, res) => {
   try {

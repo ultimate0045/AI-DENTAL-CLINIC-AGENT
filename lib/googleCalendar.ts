@@ -288,14 +288,15 @@ export async function bookCalendarAppointment(
 export async function deleteCalendarEvent(
   eventId: string,
   calendarId?: string,
-  date?: string
+  date?: string,
+  serviceAccountJson?: string
 ): Promise<{ success: boolean; error?: string }> {
   try {
     const id = resolveCalendarId(calendarId)
     if (!id || !eventId) {
       return { success: false, error: 'Calendar ID or Event ID missing' }
     }
-    const calendar = getCalendarClient()
+    const calendar = getCalendarClient(serviceAccountJson)
     await calendar.events.delete({
       calendarId: id,
       eventId: eventId,

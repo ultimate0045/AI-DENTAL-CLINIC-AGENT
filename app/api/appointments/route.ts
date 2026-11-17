@@ -8,6 +8,8 @@ export async function GET(request: Request) {
     const { searchParams } = new URL(request.url)
     const statusFilter = searchParams.get('status')
     const countOnly = searchParams.get('countOnly') === 'true'
+    const conversationId = searchParams.get('conversationId') || searchParams.get('conversation_id')
+    const phone = searchParams.get('phone')
 
     const supabase = createAdminClient()
 
@@ -17,6 +19,15 @@ export async function GET(request: Request) {
 
     if (statusFilter) {
       query = query.eq('status', statusFilter)
+    }
+
+    if (conversationId) {
+      query = query.eq('conversation_id', conversationId)
+    } else if (phone) {
+      const cleanPhone = phone.replace(/\D/g, '').slice(-10)
+      if (cleanPhone) {
+        query = query.ilike('patient_phone', `%${cleanPhone}%`)
+      }
     }
 
     const limit = searchParams.get('limit') ? parseInt(searchParams.get('limit')!, 10) : undefined

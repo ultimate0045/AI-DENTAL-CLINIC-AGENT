@@ -10,8 +10,10 @@ import {
   Sparkles,
   Phone,
   Calendar,
+  CalendarCheck,
   Check,
   CheckCheck,
+  CheckCircle2,
   ShieldAlert,
   Loader2,
   Paperclip,
@@ -22,6 +24,9 @@ import { useSocket } from '@/hooks/useSocket'
 import { formatTime, formatPhone, getInitials } from '@/lib/utils'
 import { ChatMessage } from '@/types/index'
 import SimulateModal from '@/components/SimulateModal'
+import AppointmentStatusActions, {
+  AppointmentStatusBadge,
+} from '@/components/AppointmentStatusActions'
 
 interface ChatWindowProps {
   conversationId: string
@@ -46,7 +51,30 @@ export default function ChatWindow({
   const [simulating, setSimulating] = useState(false)
   const [loading, setLoading] = useState(true)
   const [isSimulateOpen, setIsSimulateOpen] = useState(false)
+  const [activeAppt, setActiveAppt] = useState<any>(null)
+  const [chatToast, setChatToast] = useState<string | null>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
+
+  const fetchActiveAppointment = async (phoneNum?: string) => {
+    try {
+      const phone = phoneNum || conversation?.phone_number
+      let url = `/api/appointments?conversationId=${conversationId}&limit=1`
+      if (phone) {
+        url += `&phone=${encodeURIComponent(phone)}`
+      }
+      const res = await fetch(url)
+      if (res.ok) {
+        const data = await res.json()
+        if (data?.appointments && data.appointments.length > 0) {
+          setActiveAppt(data.appointments[0])
+        } else {
+          setActiveAppt(null)
+        }
+      }
+    } catch (err) {
+      console.warn('Failed to fetch appointment for chat window:', err)
+    }
+  }
 
   const fetchHistory = async () => {
     try {
@@ -57,6 +85,7 @@ export default function ChatWindow({
         if (data.conversation) {
           setConversation(data.conversation)
           setAiMode(data.conversation.ai_mode !== false)
+          fetchActiveAppointment(data.conversation.phone_number)
         }
       }
     } catch (err) {
@@ -66,11 +95,12 @@ export default function ChatWindow({
     }
   }
 
-  // 1. Fetch initial message history
+  // 1. Fetch initial message history & appointment
   useEffect(() => {
     setLoading(true)
     if (conversationId) {
       fetchHistory()
+      fetchActiveAppointment()
     }
   }, [conversationId])
 
@@ -195,6 +225,7 @@ export default function ChatWindow({
             }
             return [...withoutTemp, actualUserMsg, aiMsg]
           })
+          fetchActiveAppointment()
         }
       }
     } catch (err) {
@@ -277,6 +308,54 @@ export default function ChatWindow({
           </div>
         </div>
       </div>
+
+      {/* ── 1.5 Patient Active Appointment Context & Action Bar ── */}
+      {activeAppt && (
+        <div className="bg-background/95 backdrop-blur-xs border-b border-border/80 px-3 sm:px-4 py-2 sm:py-2.5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 z-10 shadow-2xs">
+          {/* Left: Date, Time, Status Badge & Booking ID */}
+          <div className="flex items-center gap-2 sm:gap-2.5 flex-wrap min-w-0">
+            <div className="flex items-center gap-1.5 text-xs font-semibold text-foreground">
+              <CalendarCheck className="w-3.5 h-3.5 text-emerald-500 flex-shrink-0" />
+              <span>{activeAppt.appointment_date}</span>
+              <span className="text-muted-foreground font-normal">at</span>
+              <span className="text-emerald-600 dark:text-emerald-400 font-bold">{activeAppt.time_slot}</span>
+            </div>
+
+            <AppointmentStatusBadge status={activeAppt.status} />
+
+            <span className="text-[10px] sm:text-[11px] font-mono text-muted-foreground px-1.5 py-0.5 rounded bg-muted/60">
+              {activeAppt.booking_id}
+            </span>
+
+            {activeAppt.dental_issue && (
+              <span className="text-[10px] sm:text-xs text-muted-foreground truncate max-w-[160px] sm:max-w-[240px] hidden md:inline">
+                • {activeAppt.dental_issue.replace(/\((First-time|Regular|Returning)[^)]*\)/gi, '').trim()}
+              </span>
+            )}
+          </div>
+
+          {/* Right: The 3 touch-friendly action buttons */}
+          <AppointmentStatusActions
+            appointmentId={activeAppt.id || activeAppt.booking_id}
+            currentStatus={activeAppt.status}
+            onStatusChange={(newStatus) => {
+              setActiveAppt((prev: any) => (prev ? { ...prev, status: newStatus } : prev))
+            }}
+            onToast={(msg) => {
+              setChatToast(msg)
+              setTimeout(() => setChatToast(null), 3500)
+            }}
+          />
+        </div>
+      )}
+
+      {/* Floating Chat Toast Notification */}
+      {chatToast && (
+        <div className="absolute top-16 left-1/2 -translate-x-1/2 z-50 bg-foreground text-background text-xs font-medium px-3.5 py-1.5 rounded-full shadow-lg flex items-center gap-2 animate-in fade-in duration-200">
+          <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 flex-shrink-0" />
+          <span>{chatToast}</span>
+        </div>
+      )}
 
       {/* ── 2. Message Stream ── */}
       <div className="flex-1 overflow-y-auto p-4 space-y-3.5 bg-opacity-30">
@@ -450,7 +529,10 @@ export default function ChatWindow({
         defaultPhone={conversation?.phone_number}
         defaultName={conversation?.patient_name}
         conversationId={conversationId}
-        onSuccess={() => fetchHistory()}
+        onSuccess={() => {
+          fetchHistory()
+          fetchActiveAppointment()
+        }}
       />
     </div>
   )

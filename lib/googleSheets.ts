@@ -410,3 +410,119 @@ export async function getAppointmentsFromSheet(sheetId?: string): Promise<SheetA
     timestamp: r[7] || '',
   }))
 }
+
+/**
+ * Update the status of an appointment row in the Google Sheet's 'Appointments' tab
+ */
+export async function updateAppointmentStatusInSheet(params: {
+  bookingId?: string
+  phone?: string
+  date?: string
+  timeSlot?: string
+  status: string
+  sheetId?: string
+  serviceAccountJson?: string
+}): Promise<{ success: boolean; updatedRow?: number; error?: string }> {
+  try {
+    const id = resolveSheetId(params.sheetId)
+    if (!id) {
+      return { success: false, error: 'Google Sheet ID not configured' }
+    }
+    const sheets = getSheetsClient(params.serviceAccountJson)
+
+    // 1. Fetch rows from Appointments tab
+    let res: any
+    try {
+      res = await sheets.spreadsheets.values.get({
+        spreadsheetId: id,
+        range: 'Appointments!A:H',
+      })
+    } catch (readErr: any) {
+      console.warn('[Google Sheets] Appointments tab read error:', readErr?.message)
+      await setupSheetHeaders(id)
+      return { success: false, error: 'Sheet initialized, row not found' }
+    }
+
+    const rows: string[][] = res.data.values || []
+    if (rows.length < 2) {
+      return { success: false, error: 'No appointment rows in sheet' }
+    }
+
+    // Determine status column index from header (row 0)
+    const headers = rows[0] || []
+    let statusColIdx = headers.findIndex((h: any) =>
+      typeof h === 'string' && h.toLowerCase().trim() === 'status'
+    )
+    if (statusColIdx === -1) {
+      // Default to column G (index 6) as defined in APPOINTMENT_HEADERS
+      statusColIdx = 6
+    }
+
+    const targetBookingId = (params.bookingId || '').trim().toLowerCase()
+    const targetPhoneDigits = (params.phone || '').replace(/\D/g, '').slice(-10)
+    const targetDate = (params.date || '').trim()
+
+    let matchedRowIndex = -1 // 0-based index in rows array
+
+    for (let i = 1; i < rows.length; i++) {
+      const row = rows[i]
+      const rowBookingId = (row[0] || '').trim().toLowerCase()
+      const rowDate = (row[1] || '').trim()
+      const rowPhone = (row[4] || '').replace(/\D/g, '')
+
+      // Match 1: Booking ID match
+      if (targetBookingId && rowBookingId) {
+        if (
+          rowBookingId === targetBookingId ||
+          rowBookingId.includes(targetBookingId) ||
+          targetBookingId.includes(rowBookingId)
+        ) {
+          matchedRowIndex = i
+          break
+        }
+      }
+
+      // Match 2: Phone number (+ optional Date) match
+      if (targetPhoneDigits && rowPhone) {
+        const phoneMatches =
+          rowPhone.endsWith(targetPhoneDigits) || targetPhoneDigits.endsWith(rowPhone.slice(-10))
+        if (phoneMatches) {
+          if (!targetDate || rowDate === targetDate) {
+            matchedRowIndex = i
+            break
+          }
+        }
+      }
+    }
+
+    if (matchedRowIndex === -1) {
+      console.warn(
+        `[Google Sheets] No matching row found to update status for bookingId: "${params.bookingId}", phone: "${params.phone}"`
+      )
+      return { success: false, error: 'Appointment row not found in sheet' }
+    }
+
+    const rowNum = matchedRowIndex + 1 // 1-based row number for Sheets API
+    const colLetter = String.fromCharCode(65 + statusColIdx) // e.g. 'G'
+    const updateRange = `Appointments!${colLetter}${rowNum}`
+
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: id,
+      range: updateRange,
+      valueInputOption: 'USER_ENTERED',
+      requestBody: {
+        values: [[params.status]],
+      },
+    })
+
+    console.log(`✅ [Google Sheets] Updated status to "${params.status}" at ${updateRange}`)
+    return { success: true, updatedRow: rowNum }
+  } catch (err: any) {
+    const errMsg =
+      err?.response?.data?.error?.message ||
+      err?.message ||
+      'Failed to update appointment status in sheet'
+    console.error('❌ [Google Sheets updateAppointmentStatusInSheet Error]:', errMsg)
+    return { success: false, error: errMsg }
+  }
+}
