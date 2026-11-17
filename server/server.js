@@ -357,19 +357,44 @@ function isBasicGreeting(text) {
   return GREETING_WORDS.has(clean);
 }
 
-// ─── In-Memory Deduplication Set (with automatic TTL cleanup after 10 minutes) ───
+// ─── Dual-Layer Message Deduplication (In-Memory 1-Hour TTL + Persistent Supabase) ───
 const processedMessageIds = new Set();
 
-function isDuplicateWebhook(messageId) {
-  if (!messageId) return false;
+function isMemoryDuplicate(messageId) {
+  if (!messageId) return true;
   if (processedMessageIds.has(messageId)) {
     return true;
   }
   processedMessageIds.add(messageId);
   setTimeout(() => {
     processedMessageIds.delete(messageId);
-  }, 10 * 60 * 1000);
+  }, 60 * 60 * 1000); // Retain in memory for 1 hour to block fast retries
   return false;
+}
+
+async function isMessageAlreadyInDb(messageId) {
+  if (!messageId) return true;
+  try {
+    const { data } = await supabase
+      .from('processed_messages')
+      .select('message_id')
+      .eq('message_id', messageId)
+      .maybeSingle();
+    return Boolean(data?.message_id);
+  } catch (err) {
+    console.warn('[Dedup DB Check Warning]:', err.message);
+    return false;
+  }
+}
+
+function markMessageProcessedInDb(messageId) {
+  if (!messageId) return;
+  Promise.resolve(
+    supabase.from('processed_messages').insert({
+      message_id: messageId,
+      processed_at: new Date().toISOString(),
+    })
+  ).catch(() => {});
 }
 
 // ─── Simple Post-Booking Acknowledgment Detection ───────────────────────────
@@ -2192,21 +2217,29 @@ app.post(['/webhook', '/api/webhook'], async (req, res) => {
 
     const entry = body.entry?.[0];
     const changes = entry?.changes?.[0];
-    const value = changes?.value;
+    const field = changes?.field;
 
+    // Guardrail: Only process 'messages' changes (ignore template status, name updates, etc.)
+    if (field && field !== 'messages') {
+      console.log(`ℹ️ [Webhook] Ignored non-messages field: ${field}`);
+      return;
+    }
+
+    const value = changes?.value;
     if (!value) {
       console.log('ℹ️ [Webhook] No entry.changes[0].value found in payload');
       return;
     }
 
-    // Check for status updates (sent, delivered, read)
-    if (value.statuses?.length) {
+    // Guardrail: Strictly ignore status updates (sent, delivered, read) — NEVER reply to statuses!
+    if (value.statuses && value.statuses.length > 0) {
       const st = value.statuses[0];
-      console.log(`ℹ️ [Webhook Status] Message ${st.id} -> ${st.status} (recipient: ${st.recipient_id})`);
+      console.log(`ℹ️ [Webhook Status Ignored] Message ${st.id} -> ${st.status} (recipient: ${st.recipient_id})`);
       return;
     }
 
-    if (!value.messages?.length) {
+    // Guardrail: Must contain at least one user message
+    if (!value.messages || value.messages.length === 0) {
       console.log('ℹ️ [Webhook] No messages array in payload');
       return;
     }
@@ -2214,23 +2247,42 @@ app.post(['/webhook', '/api/webhook'], async (req, res) => {
     const rawMessage = value.messages[0];
     const message_id = rawMessage.id;
     const rawFrom = rawMessage.from; // sender's phone number e.g. "919876543210"
-    const from = rawFrom.startsWith('+') ? rawFrom : `+${rawFrom}`;
+    const from = rawFrom ? (rawFrom.startsWith('+') ? rawFrom : `+${rawFrom}`) : '';
     const type = rawMessage.type; // text | image | audio | interactive ...
     const contactName = value.contacts?.[0]?.profile?.name || '';
 
-    console.log(`💬 [Webhook Message] From: ${contactName} (${from}) | Type: ${type} | ID: ${message_id}`);
-
-    // ── Instant In-Memory Deduplication (0ms, prevents retry storm) ──────────
-    if (processedMessageIds.has(message_id) || isDuplicateWebhook(message_id)) {
-      console.log(`⏩ [Webhook] Instant deduplication dropped duplicate/retried message: ${message_id}`);
+    if (!message_id || !from) {
+      console.log('ℹ️ [Webhook] Missing message_id or sender phone, dropping');
       return;
     }
 
-    // Asynchronously log to processed_messages in Supabase (fire & forget)
-    Promise.resolve(supabase.from('processed_messages').insert({
-      message_id,
-      processed_at: new Date().toISOString(),
-    })).catch(() => {});
+    console.log(`💬 [Webhook Message] From: ${contactName} (${from}) | Type: ${type} | ID: ${message_id}`);
+
+    // ── GUARDRAIL 1: STALE MESSAGE CHECK (Max 120 seconds old) ───────────────
+    // Meta sends unix timestamp in seconds. Stale retries hours later MUST be dropped!
+    const rawTimestamp = parseInt(rawMessage.timestamp, 10);
+    const nowSec = Math.floor(Date.now() / 1000);
+    if (rawTimestamp && (nowSec - rawTimestamp > 120)) {
+      console.log(`⏱️ [Webhook Stale Guard] Dropped stale message ${message_id} (${nowSec - rawTimestamp}s old, max allowed is 120s)`);
+      return;
+    }
+
+    // ── GUARDRAIL 2: DUAL-LAYER MESSAGE DEDUPLICATION (Memory + Supabase) ────
+    // Layer 1: Instant in-memory check (0ms)
+    if (isMemoryDuplicate(message_id)) {
+      console.log(`⏩ [Webhook Dedup] In-memory dropped duplicate message: ${message_id}`);
+      return;
+    }
+
+    // Layer 2: Persistent Supabase check (survives server restarts and dyno recycling)
+    const alreadyProcessedInDb = await isMessageAlreadyInDb(message_id);
+    if (alreadyProcessedInDb) {
+      console.log(`⏩ [Webhook Dedup] DB dropped already-processed message: ${message_id}`);
+      return;
+    }
+
+    // Immediately record in Supabase so any concurrent retries are locked out
+    markMessageProcessedInDb(message_id);
 
     // Mark message as read on WhatsApp (fire & forget, non-blocking)
     (async () => {
@@ -2461,14 +2513,7 @@ app.post(['/webhook', '/api/webhook'], async (req, res) => {
     await processWithGemini(conversationId, from, messageText, type, imageUrl, t0);
   } catch (err) {
     console.error('❌ [Webhook POST Error]:', err.message, err.stack);
-    if (from) {
-      try {
-        const emergencyMsg = "I'm having a brief connection delay. Could you please share your preferred appointment date or question again?";
-        await sendWhatsAppMessage(from, emergencyMsg);
-      } catch (sendErr) {
-        console.error('❌ [Webhook Emergency Reply Failed]:', sendErr.message);
-      }
-    }
+    // Unsolicited auto-messaging removed: NEVER send automated emergency messages to users on error
   }
 });
 

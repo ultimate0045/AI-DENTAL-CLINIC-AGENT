@@ -5,6 +5,9 @@ import { sendTextMessage, markMessageAsRead } from '@/lib/metaWhatsapp'
 
 export const dynamic = 'force-dynamic'
 
+// ─── In-Memory Deduplication Set ─────────────────────────────────────────────
+const inMemoryProcessedIds = new Set<string>()
+
 /**
  * GET /api/webhook — Meta Webhook Verification Challenge
  */
@@ -36,7 +39,19 @@ export async function POST(request: Request) {
 
     const entry = body.entry?.[0]
     const changes = entry?.changes?.[0]
+
+    // Guardrail: Only process 'messages' changes
+    if (changes?.field && changes.field !== 'messages') {
+      return NextResponse.json({ status: 'ignored_field' }, { status: 200 })
+    }
+
     const value = changes?.value
+
+    // Guardrail: Strictly ignore status updates (sent, delivered, read) — NEVER reply to statuses!
+    if (value?.statuses && value.statuses.length > 0) {
+      return NextResponse.json({ status: 'ignored_status' }, { status: 200 })
+    }
+
     if (!value?.messages?.length) {
       return NextResponse.json({ status: 'no_messages' }, { status: 200 })
     }
@@ -44,13 +59,33 @@ export async function POST(request: Request) {
     const rawMessage = value.messages[0]
     const messageId = rawMessage.id
     const fromPhone = rawMessage.from // E.164 without plus e.g. 919876543210
-    const formattedPhone = fromPhone.startsWith('+') ? fromPhone : `+${fromPhone}`
+    const formattedPhone = fromPhone ? (fromPhone.startsWith('+') ? fromPhone : `+${fromPhone}`) : ''
     const messageType = rawMessage.type
     const contactName = value.contacts?.[0]?.profile?.name || ''
 
-    const supabase = createAdminClient()
+    if (!messageId || !formattedPhone) {
+      return NextResponse.json({ status: 'invalid_payload' }, { status: 200 })
+    }
 
-    // 1. Deduplication
+    // ── GUARDRAIL 1: STALE MESSAGE CHECK (Max 120s old) ──────────────────────
+    const rawTimestamp = parseInt(rawMessage.timestamp, 10)
+    const nowSec = Math.floor(Date.now() / 1000)
+    if (rawTimestamp && (nowSec - rawTimestamp > 120)) {
+      console.log(`⏱️ [Next.js Webhook] Dropping stale message ${messageId} (${nowSec - rawTimestamp}s old, max 120s)`)
+      return NextResponse.json({ status: 'stale_message' }, { status: 200 })
+    }
+
+    // ── GUARDRAIL 2: DUAL-LAYER MESSAGE DEDUPLICATION ────────────────────────
+    // Layer 1: In-memory (fast)
+    if (inMemoryProcessedIds.has(messageId)) {
+      console.log(`[Meta Webhook] In-memory duplicate dropped: ${messageId}`)
+      return NextResponse.json({ status: 'duplicate' }, { status: 200 })
+    }
+    inMemoryProcessedIds.add(messageId)
+    setTimeout(() => inMemoryProcessedIds.delete(messageId), 60 * 60 * 1000)
+
+    // Layer 2: Persistent Supabase table
+    const supabase = createAdminClient()
     const { data: existing } = await supabase
       .from('processed_messages')
       .select('message_id')
@@ -58,11 +93,14 @@ export async function POST(request: Request) {
       .maybeSingle()
 
     if (existing) {
-      console.log(`[Meta Webhook] Duplicate message skipped: ${messageId}`)
+      console.log(`[Meta Webhook] Persistent DB duplicate message skipped: ${messageId}`)
       return NextResponse.json({ status: 'duplicate' }, { status: 200 })
     }
 
-    await supabase.from('processed_messages').insert({ message_id: messageId })
+    await supabase.from('processed_messages').insert({
+      message_id: messageId,
+      processed_at: new Date().toISOString(),
+    })
 
     // 2. Mark as read on WhatsApp
     await markMessageAsRead(messageId).catch(() => {})
