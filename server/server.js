@@ -2518,7 +2518,7 @@ app.post(['/webhook', '/api/webhook'], async (req, res) => {
     });
 
     // Check AI mode
-    if (existingConv && existingConv.ai_mode === false) {
+    if (conv && conv.ai_mode === false) {
       console.log(`👤 [Webhook] Human mode active for conversation ${conversationId}. No AI response.`);
       return;
     }
