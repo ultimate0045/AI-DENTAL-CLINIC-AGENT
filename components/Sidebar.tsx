@@ -92,7 +92,7 @@ export default function Sidebar({
   })
 
   return (
-    <aside className={cn("flex flex-col h-full w-full md:w-88 border-r border-border bg-card select-none flex-shrink-0", className)}>
+    <aside className={cn("flex flex-col h-full w-full md:w-[340px] lg:w-[380px] border-r border-border bg-card flex-shrink-0 relative", className)}>
       {/* 1. Header with clinic branding */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-border bg-muted/30">
         <div className="flex items-center gap-2.5">
@@ -110,23 +110,29 @@ export default function Sidebar({
           </div>
         </div>
 
-        <div className="flex items-center gap-1">
-          {/* Settings link */}
-          <Link
-            href="/dashboard/settings"
+        <div className="flex items-center gap-1 relative z-50">
+          {/* Settings button */}
+          <button
+            type="button"
+            onClick={() => router.push('/dashboard/settings')}
             title="Clinic Settings"
-            className={`p-2 rounded-full hover:bg-muted transition-colors ${
-              pathname === '/dashboard/settings' ? 'text-emerald-500 bg-emerald-500/10' : 'text-muted-foreground'
-            }`}
+            aria-label="Clinic Settings"
+            className={cn(
+              "p-2 rounded-full hover:bg-muted transition-colors cursor-pointer relative z-50 pointer-events-auto",
+              pathname === '/dashboard/settings'
+                ? 'text-emerald-500 bg-emerald-500/10'
+                : 'text-muted-foreground hover:text-foreground'
+            )}
           >
-            <Settings className="w-4 h-4" />
-          </Link>
+            <Settings className="w-4 h-4 pointer-events-none" />
+          </button>
 
           {/* Theme toggle */}
           <button
+            type="button"
             onClick={toggleTheme}
             title={isDark ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
-            className="p-2 rounded-full hover:bg-muted text-muted-foreground transition-colors"
+            className="p-2 rounded-full hover:bg-muted text-muted-foreground transition-colors cursor-pointer"
           >
             {isDark ? <Sun className="w-4 h-4 text-amber-400" /> : <Moon className="w-4 h-4 text-slate-700" />}
           </button>
@@ -262,18 +268,32 @@ export default function Sidebar({
       </div>
 
       {/* 4. Bottom footer */}
-      <div className="p-3 border-t border-border bg-muted/20 flex items-center justify-between text-xs">
+      <div className="p-3 border-t border-border bg-muted/20 flex items-center justify-between text-xs relative z-40">
         <Link
           href="/dashboard"
-          className="flex items-center gap-1.5 text-muted-foreground hover:text-foreground font-medium transition-colors"
+          className="flex items-center gap-1.5 text-muted-foreground hover:text-foreground font-medium transition-colors cursor-pointer"
         >
           <MessageSquare className="w-4 h-4" />
           <span>All Chats</span>
         </Link>
 
         <button
+          type="button"
+          onClick={() => router.push('/dashboard/settings')}
+          className={cn(
+            "flex items-center gap-1 text-muted-foreground hover:text-foreground font-medium transition-colors cursor-pointer",
+            pathname === '/dashboard/settings' && "text-emerald-600 dark:text-emerald-400 font-semibold"
+          )}
+          title="Clinic Settings & Integrations"
+        >
+          <Settings className="w-3.5 h-3.5" />
+          <span>Settings</span>
+        </button>
+
+        <button
+          type="button"
           onClick={handleLogout}
-          className="flex items-center gap-1 text-red-500 hover:text-red-600 transition-colors"
+          className="flex items-center gap-1 text-red-500 hover:text-red-600 transition-colors cursor-pointer"
           title="Sign out"
         >
           <LogOut className="w-3.5 h-3.5" />

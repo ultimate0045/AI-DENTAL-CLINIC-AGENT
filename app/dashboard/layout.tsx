@@ -15,8 +15,6 @@ import {
   LogOut,
   Stethoscope,
   Loader2,
-  Menu,
-  X,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
@@ -72,15 +70,6 @@ export default function DashboardLayout({
       .catch(() => {})
   }, [])
 
-  // 3. Reset mobile tab to 'chats' if leaving dashboard home
-  useEffect(() => {
-    if (pathname.startsWith('/dashboard/chat/')) {
-      // In chat view
-    } else if (pathname === '/dashboard') {
-      // Keep selected mobile tab
-    }
-  }, [pathname])
-
   const handleLogout = async () => {
     await supabase.auth.signOut()
     router.replace('/login')
@@ -112,51 +101,55 @@ export default function DashboardLayout({
       {/* Top Integration Status Bar (hidden on mobile chat view to maximize conversation height) */}
       <StatusBar className={isChatView ? 'hidden md:flex' : 'flex'} />
 
-      {/* Main Workspace: Sidebar + Content */}
-      <div className="flex flex-1 overflow-hidden relative">
-        {/* Sidebar:
-            - Desktop: Always visible (w-88 border-r)
-            - Mobile:
-              * Chat View (/dashboard/chat/[id]): Hidden
-              * Settings View (/dashboard/settings): Hidden
-              * Dashboard Home (/dashboard): Visible full-screen if mobileTab === 'chats'
+      {/* Main Workspace: Classic WhatsApp Web Two-Pane Split Layout on Desktop
+          - Desktop (md: and above): Persistent Left Sidebar (w-[340px] or lg:w-[380px]) + Right Main Pane (flex-1)
+          - Mobile (< md): Single-pane toggle between Chats, Active Chat, and Settings
+      */}
+      <div className="flex flex-row flex-1 overflow-hidden relative">
+        {/* Left Sidebar Pane:
+            - Desktop (>= 768px): Always visible side-by-side with width 340px-380px
+            - Mobile (< 768px): Full-screen when on /dashboard with 'chats' tab, hidden when viewing single chat or settings
         */}
         <Sidebar
           clinicName={clinicName}
           className={cn(
+            // Mobile visibility
             isChatView || isSettingsView
-              ? 'hidden md:flex'
+              ? 'hidden'
               : mobileTab === 'chats'
-              ? 'flex w-full md:w-88'
-              : 'hidden md:flex md:w-88'
+              ? 'flex w-full'
+              : 'hidden',
+            // Desktop visibility: ALWAYS visible side-by-side
+            'md:flex md:w-[340px] lg:w-[380px] md:flex-shrink-0'
           )}
         />
 
-        {/* Main Content Area:
-            - Desktop: Always visible (flex-1)
-            - Mobile:
-              * Chat View: Full screen (w-full)
-              * Settings View: Full screen (w-full)
-              * Dashboard Home: Visible full-screen only if mobileTab === 'overview'
+        {/* Right Main Pane:
+            - Desktop (>= 768px): Always visible side-by-side (flex-1 min-w-0)
+            - Mobile (< 768px): Full-screen when on active chat, settings, or dashboard 'overview' tab
         */}
         <main
           className={cn(
-            'flex-1 overflow-hidden flex flex-col relative',
+            'overflow-hidden flex flex-col relative',
+            // Mobile visibility
             isChatView || isSettingsView
-              ? 'flex w-full'
+              ? 'flex w-full h-full'
               : mobileTab === 'overview'
-              ? 'flex w-full'
-              : 'hidden md:flex'
+              ? 'flex w-full h-full'
+              : 'hidden',
+            // Desktop visibility: ALWAYS visible side-by-side
+            'md:flex md:flex-1 md:min-w-0 md:h-full'
           )}
         >
-          {/* Mobile Top Tab Switcher on /dashboard Home */}
+          {/* Mobile-Only Top Tab Switcher on /dashboard Home */}
           {isDashboardHome && (
             <div className="md:hidden flex items-center justify-center p-2.5 bg-card border-b border-border">
               <div className="grid grid-cols-2 p-1 bg-muted rounded-xl w-full max-w-xs text-xs font-semibold">
                 <button
+                  type="button"
                   onClick={() => setMobileTab('chats')}
                   className={cn(
-                    'flex items-center justify-center gap-1.5 py-1.5 px-3 rounded-lg transition-all',
+                    'flex items-center justify-center gap-1.5 py-1.5 px-3 rounded-lg transition-all cursor-pointer',
                     mobileTab === 'chats'
                       ? 'bg-background text-foreground shadow-sm'
                       : 'text-muted-foreground hover:text-foreground'
@@ -166,9 +159,10 @@ export default function DashboardLayout({
                   <span>Chats & Inbox</span>
                 </button>
                 <button
+                  type="button"
                   onClick={() => setMobileTab('overview')}
                   className={cn(
-                    'flex items-center justify-center gap-1.5 py-1.5 px-3 rounded-lg transition-all',
+                    'flex items-center justify-center gap-1.5 py-1.5 px-3 rounded-lg transition-all cursor-pointer',
                     mobileTab === 'overview'
                       ? 'bg-background text-foreground shadow-sm'
                       : 'text-muted-foreground hover:text-foreground'
@@ -185,14 +179,15 @@ export default function DashboardLayout({
         </main>
       </div>
 
-      {/* ── Mobile Bottom Navigation Bar ──
+      {/* ── Mobile Bottom Navigation Bar (Strictly md:hidden on Desktop) ──
           Visible only on screens < md (360px - 767px).
           Hidden in active chat view (/dashboard/chat/[id]) so the virtual keyboard and chat input are unobstructed.
       */}
       {!isChatView && (
-        <nav className="md:hidden flex items-center justify-around px-2 py-2 border-t border-border bg-card/95 backdrop-blur-md select-none z-30">
+        <nav className="md:hidden flex items-center justify-around px-2 py-2 border-t border-border bg-card/95 backdrop-blur-md z-30">
           {/* 1. Chats Tab */}
           <button
+            type="button"
             onClick={() => {
               if (pathname !== '/dashboard') {
                 router.push('/dashboard')
@@ -200,18 +195,19 @@ export default function DashboardLayout({
               setMobileTab('chats')
             }}
             className={cn(
-              'flex flex-col items-center justify-center gap-1 py-1 px-3 rounded-xl transition-colors',
+              'flex flex-col items-center justify-center gap-1 py-1 px-3 rounded-xl transition-colors cursor-pointer',
               isDashboardHome && mobileTab === 'chats'
                 ? 'text-emerald-600 dark:text-emerald-400 font-bold'
                 : 'text-muted-foreground hover:text-foreground'
             )}
           >
-            <MessageSquare className="w-5 h-5" />
-            <span className="text-[10px]">Chats</span>
+            <MessageSquare className="w-5 h-5 pointer-events-none" />
+            <span className="text-[10px] pointer-events-none">Chats</span>
           </button>
 
           {/* 2. Overview / Appointments */}
           <button
+            type="button"
             onClick={() => {
               if (pathname !== '/dashboard') {
                 router.push('/dashboard')
@@ -219,49 +215,53 @@ export default function DashboardLayout({
               setMobileTab('overview')
             }}
             className={cn(
-              'flex flex-col items-center justify-center gap-1 py-1 px-3 rounded-xl transition-colors',
+              'flex flex-col items-center justify-center gap-1 py-1 px-3 rounded-xl transition-colors cursor-pointer',
               isDashboardHome && mobileTab === 'overview'
                 ? 'text-emerald-600 dark:text-emerald-400 font-bold'
                 : 'text-muted-foreground hover:text-foreground'
             )}
           >
-            <CalendarCheck className="w-5 h-5" />
-            <span className="text-[10px]">Overview</span>
+            <CalendarCheck className="w-5 h-5 pointer-events-none" />
+            <span className="text-[10px] pointer-events-none">Overview</span>
           </button>
 
           {/* 3. Simulate (Quick Test) */}
           <button
+            type="button"
             onClick={() => setIsSimulateOpen(true)}
-            className="flex flex-col items-center justify-center gap-1 py-1 px-3 text-emerald-600 dark:text-emerald-400 hover:text-emerald-500 transition-colors"
+            className="flex flex-col items-center justify-center gap-1 py-1 px-3 text-emerald-600 dark:text-emerald-400 hover:text-emerald-500 transition-colors cursor-pointer"
           >
-            <div className="w-6 h-6 rounded-full bg-emerald-500/15 flex items-center justify-center">
+            <div className="w-6 h-6 rounded-full bg-emerald-500/15 flex items-center justify-center pointer-events-none">
               <Sparkles className="w-3.5 h-3.5 text-emerald-500" />
             </div>
-            <span className="text-[10px] font-semibold">Simulate</span>
+            <span className="text-[10px] font-semibold pointer-events-none">Simulate</span>
           </button>
 
-          {/* 4. Settings */}
-          <Link
-            href="/dashboard/settings"
+          {/* 4. Settings (Clean, direct click with z-50 and pointer-events-auto) */}
+          <button
+            type="button"
+            onClick={() => router.push('/dashboard/settings')}
             className={cn(
-              'flex flex-col items-center justify-center gap-1 py-1 px-3 rounded-xl transition-colors',
+              'relative z-50 pointer-events-auto flex flex-col items-center justify-center gap-1 py-1 px-3 rounded-xl transition-colors cursor-pointer',
               isSettingsView
                 ? 'text-emerald-600 dark:text-emerald-400 font-bold'
                 : 'text-muted-foreground hover:text-foreground'
             )}
+            title="Clinic Settings"
           >
-            <Settings className="w-5 h-5" />
-            <span className="text-[10px]">Settings</span>
-          </Link>
+            <Settings className="w-5 h-5 pointer-events-none" />
+            <span className="text-[10px] pointer-events-none">Settings</span>
+          </button>
 
           {/* 5. Logout */}
           <button
+            type="button"
             onClick={handleLogout}
-            className="flex flex-col items-center justify-center gap-1 py-1 px-3 text-red-500 hover:text-red-600 transition-colors"
+            className="flex flex-col items-center justify-center gap-1 py-1 px-3 text-red-500 hover:text-red-600 transition-colors cursor-pointer"
             title="Sign out"
           >
-            <LogOut className="w-5 h-5" />
-            <span className="text-[10px]">Logout</span>
+            <LogOut className="w-5 h-5 pointer-events-none" />
+            <span className="text-[10px] pointer-events-none">Logout</span>
           </button>
         </nav>
       )}

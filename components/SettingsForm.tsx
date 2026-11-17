@@ -1105,7 +1105,7 @@ export function SettingsForm({ initialSettings, onSave }: SettingsFormProps) {
 
       {/* Sticky bottom save bar when form is dirty */}
       {isDirty && (
-        <div className="fixed bottom-0 left-0 right-0 z-30 bg-white dark:bg-[#1f2c33] border-t border-gray-200 dark:border-[#3B4A54] px-6 py-3 flex items-center justify-between shadow-lg">
+        <div className="fixed bottom-0 left-0 md:left-[340px] lg:left-[380px] right-0 z-40 bg-white dark:bg-[#1f2c33] border-t border-gray-200 dark:border-[#3B4A54] px-4 sm:px-6 py-3 flex items-center justify-between shadow-lg">
           <span className="text-sm text-amber-600 dark:text-amber-400 flex items-center gap-2">
             <span className="h-2 w-2 rounded-full bg-amber-500 animate-pulse" />
             You have unsaved changes

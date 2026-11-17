@@ -107,14 +107,14 @@ export default function DashboardPage() {
           <div className="flex flex-wrap items-center justify-center gap-2 sm:gap-3 pt-1">
             <Button
               onClick={() => setIsSimulateOpen(true)}
-              className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs gap-1.5 shadow-sm rounded-xl px-3.5 sm:px-4 py-2"
+              className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs gap-1.5 shadow-sm rounded-xl px-3.5 sm:px-4 py-2 cursor-pointer"
             >
               <Sparkles className="w-3.5 h-3.5" />
               <span>Test Bot (Simulate)</span>
             </Button>
 
-            <Link href="/dashboard/settings">
-              <Button variant="outline" className="text-xs gap-1.5 border-border shadow-sm rounded-xl px-3.5 sm:px-4 py-2">
+            <Link href="/dashboard/settings" className="relative z-20 pointer-events-auto cursor-pointer">
+              <Button variant="outline" className="text-xs gap-1.5 border-border shadow-sm rounded-xl px-3.5 sm:px-4 py-2 pointer-events-none">
                 <Settings className="w-3.5 h-3.5" />
                 <span>Clinic Settings</span>
               </Button>
