@@ -560,21 +560,49 @@ async function getOrCreateConversation(phoneInput, patientNameInput, lastMessage
 
 // ─── Helper: Send WhatsApp Message ───────────────────────────────────────────
 async function sendWhatsAppMessage(phone, text, preloadedSettings = null) {
+  const messageBody = text ? String(text).trim() : '';
+  const cleanPhone = normalizePhoneNumber(phone);
+  if (!cleanPhone || !messageBody) {
+    throw new Error(`[sendWhatsAppMessage] Invalid recipient ("${cleanPhone}") or empty message`);
+  }
+
+  let settings = preloadedSettings;
+  let phoneId =
+    settings?.meta_phone_number_id?.trim() ||
+    process.env.META_PHONE_NUMBER_ID?.trim() ||
+    process.env.WHATSAPP_PHONE_NUMBER_ID?.trim() ||
+    '';
+  let token =
+    settings?.meta_access_token?.trim() ||
+    process.env.META_ACCESS_TOKEN?.trim() ||
+    process.env.WHATSAPP_ACCESS_TOKEN?.trim() ||
+    process.env.META_WHATSAPP_TOKEN?.trim() ||
+    '';
+
+  if (!phoneId || !token) {
+    settings = await getClinicSettings(true);
+    phoneId =
+      settings?.meta_phone_number_id?.trim() ||
+      process.env.META_PHONE_NUMBER_ID?.trim() ||
+      process.env.WHATSAPP_PHONE_NUMBER_ID?.trim() ||
+      '';
+    token =
+      settings?.meta_access_token?.trim() ||
+      process.env.META_ACCESS_TOKEN?.trim() ||
+      process.env.WHATSAPP_ACCESS_TOKEN?.trim() ||
+      process.env.META_WHATSAPP_TOKEN?.trim() ||
+      '';
+  }
+
+  if (!phoneId || !token) {
+    const credErr = new Error(
+      `[sendWhatsAppMessage] Missing Meta credentials (hasPhoneId=${Boolean(phoneId)}, hasToken=${Boolean(token)})`
+    );
+    console.error('❌', credErr.message);
+    throw credErr;
+  }
+
   try {
-    const messageBody = text ? text.trim() : '';
-    const cleanPhone = normalizePhoneNumber(phone);
-    const settings = preloadedSettings || (await getClinicSettings());
-    const phoneId =
-      settings?.meta_phone_number_id ||
-      process.env.META_PHONE_NUMBER_ID ||
-      process.env.WHATSAPP_PHONE_NUMBER_ID ||
-      '';
-    const token =
-      settings?.meta_access_token ||
-      process.env.WHATSAPP_ACCESS_TOKEN ||
-      process.env.META_ACCESS_TOKEN ||
-      process.env.META_WHATSAPP_TOKEN ||
-      '';
     const url = `${META_GRAPH_URL}/${phoneId}/messages`;
     const response = await fastHttp.post(
       url,
@@ -590,12 +618,15 @@ async function sendWhatsAppMessage(phone, text, preloadedSettings = null) {
           Authorization: `Bearer ${token}`,
           'Content-Type': 'application/json',
         },
-        timeout: 8000,
+        timeout: 10000,
       }
     );
     return response.data;
   } catch (err) {
-    console.error('[sendWhatsAppMessage] Error:', err?.response?.data || err.message);
+    console.error(
+      `❌ [sendWhatsAppMessage] Meta API Error (HTTP ${err?.response?.status || 'NETWORK'}):`,
+      JSON.stringify(err?.response?.data || err.message)
+    );
     throw err;
   }
 }
@@ -607,15 +638,15 @@ function markWhatsAppMessageAsRead(messageId, preloadedSettings = null) {
     try {
       const settings = preloadedSettings || (await getClinicSettings());
       const phoneId =
-        settings?.meta_phone_number_id ||
-        process.env.META_PHONE_NUMBER_ID ||
-        process.env.WHATSAPP_PHONE_NUMBER_ID ||
+        settings?.meta_phone_number_id?.trim() ||
+        process.env.META_PHONE_NUMBER_ID?.trim() ||
+        process.env.WHATSAPP_PHONE_NUMBER_ID?.trim() ||
         '';
       const token =
-        settings?.meta_access_token ||
-        process.env.WHATSAPP_ACCESS_TOKEN ||
-        process.env.META_ACCESS_TOKEN ||
-        process.env.META_WHATSAPP_TOKEN ||
+        settings?.meta_access_token?.trim() ||
+        process.env.META_ACCESS_TOKEN?.trim() ||
+        process.env.WHATSAPP_ACCESS_TOKEN?.trim() ||
+        process.env.META_WHATSAPP_TOKEN?.trim() ||
         '';
       if (phoneId && token) {
         await fastHttp.post(
@@ -633,8 +664,11 @@ function markWhatsAppMessageAsRead(messageId, preloadedSettings = null) {
             timeout: 4000,
           }
         );
+        console.log(`📘 [STEP 1: READ] Marked message ${messageId} as read`);
       }
-    } catch {}
+    } catch (readErr) {
+      console.warn('[STEP 1: READ Warning]:', readErr?.response?.data || readErr.message);
+    }
   })().catch(() => {});
 }
 
@@ -1485,8 +1519,13 @@ function getContextAwareFallback(state, settings) {
 let cachedWorkingGeminiModel = null;
 
 async function callGeminiRestApi({ model, systemPrompt, contents, tools, apiKey, timeoutMs = 8000 }) {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
-  const supportsThinkingConfig = /2\.5|3\.|flash-lite-latest|thinking/i.test(model);
+  const cleanKey = (apiKey || process.env.GEMINI_API_KEY || '').trim();
+  if (!cleanKey) {
+    throw new Error('GEMINI_API_KEY is missing in clinic_settings and environment variables');
+  }
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${cleanKey}`;
+  // Only attach thinkingConfig to non-lite 2.5+ models; lite/2.0 models don't use thinking and may reject it with 400
+  const supportsThinkingConfig = /gemini-2\.5-(flash|pro)$/i.test(model);
   const generationConfig = {
     maxOutputTokens: 250,
     temperature: 0.3,
@@ -1511,15 +1550,22 @@ async function callGeminiRestApi({ model, systemPrompt, contents, tools, apiKey,
       headers: { 'Content-Type': 'application/json' },
       timeout: timeoutMs,
     });
+    if (response.status !== 200 || !response.data?.candidates?.length) {
+      throw new Error(`Unexpected Gemini HTTP ${response.status}: ${JSON.stringify(response.data || {})}`);
+    }
     return response.data;
   } catch (err) {
-    const errMsg = err?.response?.data?.error?.message || '';
-    if (supportsThinkingConfig && err?.response?.status === 400 && /thinking/i.test(errMsg)) {
+    // If ANY 400 error occurred while thinkingConfig was set, retry cleanly without thinkingConfig
+    if (supportsThinkingConfig && err?.response?.status === 400) {
+      console.warn(`[callGeminiRestApi] 400 with thinkingConfig on ${model}, retrying without thinkingConfig...`);
       delete payload.generationConfig.thinkingConfig;
       const retryRes = await fastHttp.post(url, payload, {
         headers: { 'Content-Type': 'application/json' },
         timeout: timeoutMs,
       });
+      if (retryRes.status !== 200 || !retryRes.data?.candidates?.length) {
+        throw new Error(`Unexpected Gemini retry HTTP ${retryRes.status}: ${JSON.stringify(retryRes.data || {})}`);
+      }
       return retryRes.data;
     }
     throw err;
@@ -1549,19 +1595,23 @@ async function processWithGemini(conversationId, phone, messageText, messageType
       conversationStateMap.set(conversationId, state);
     }
 
+    const isTempConv = !conversationId || String(conversationId).startsWith('temp-');
+
     // Parallelize cached settings + recent 8 chat_messages + active appointment lookup in ONE Promise.all
     const [settings, historyRes, apptRes] = await Promise.all([
       options.settings ? Promise.resolve(options.settings) : getClinicSettings(),
       options.historyRows
         ? Promise.resolve({ data: options.historyRows })
-        : Promise.resolve(
-            supabase
-              .from('chat_messages')
-              .select('role, content')
-              .eq('conversation_id', conversationId)
-              .order('created_at', { ascending: false })
-              .limit(8)
-          ).catch(() => ({ data: [] })),
+        : isTempConv
+          ? Promise.resolve({ data: [] })
+          : Promise.resolve(
+              supabase
+                .from('chat_messages')
+                .select('role, content')
+                .eq('conversation_id', conversationId)
+                .order('created_at', { ascending: false })
+                .limit(8)
+            ).catch(() => ({ data: [] })),
       !state.is_booked && phone
         ? Promise.resolve(
             supabase
@@ -1954,6 +2004,7 @@ DYNAMIC DATE RESOLUTION:
       ...(isLegacyOrInvalidModel ? [] : [configuredModel]),
       'gemini-2.5-flash-lite',
       'gemini-2.5-flash',
+      'gemini-2.0-flash',
       'gemini-flash-lite-latest',
     ];
     const uniqueCandidateModels = [...new Set(candidateModels)];
@@ -1980,11 +2031,12 @@ DYNAMIC DATE RESOLUTION:
         });
         activeModelName = mName;
         cachedWorkingGeminiModel = mName;
-        console.log(`⚡ [Gemini Success] Model ${mName} responded in ${Date.now() - tModelStart}ms (Overall: ${Date.now() - t0}ms)`);
+        console.log(`⚡ [STEP 3: GEMINI_OK] Model ${mName} responded in ${Date.now() - tModelStart}ms (Overall: ${Date.now() - t0}ms)`);
         break;
       } catch (modelErr) {
-        const errDetail = modelErr.response?.data?.error?.message || modelErr.message;
-        console.warn(`⚠️ [Gemini Fallback] Model ${mName} failed in ${Date.now() - tModelStart}ms (${errDetail?.slice(0, 80)}). Trying next model...`);
+        const status = modelErr?.response?.status || 'ERR';
+        const errDetail = modelErr?.response?.data?.error?.message || modelErr.message;
+        console.warn(`⚠️ [Gemini Fallback] Model ${mName} failed (${status}) in ${Date.now() - tModelStart}ms: ${errDetail}`);
       }
     }
 
@@ -2225,11 +2277,12 @@ DYNAMIC DATE RESOLUTION:
     const tDispatch = Date.now();
     try {
       if (!options.skipWhatsAppSend) {
-        await sendWhatsAppMessage(phone, finalText, settings);
-        console.log(`⚡ [LATENCY LOG] End-to-End: ${Date.now() - t0}ms | Model: ${activeModelName || 'fast-fallback'} | WhatsApp Dispatch API: ${Date.now() - tDispatch}ms | Recipient: ${phone}`);
+        const waRes = await sendWhatsAppMessage(phone, finalText, settings);
+        const waMsgId = waRes?.messages?.[0]?.id || 'ok';
+        console.log(`✅ [STEP 4: WA_SENT] MsgID: ${waMsgId} | End-to-End: ${Date.now() - t0}ms | Model: ${activeModelName || 'fast-fallback'} | WA API: ${Date.now() - tDispatch}ms | To: ${phone}`);
       }
     } catch (metaErr) {
-      console.error('[processWithGemini] Meta WhatsApp dispatch failed:', metaErr?.response?.data || metaErr.message);
+      console.error('❌ [STEP 4: WA_FAILED] Meta WhatsApp dispatch failed:', JSON.stringify(metaErr?.response?.data || metaErr.message));
     }
 
     // ── 2. Save logs & update conversation concurrently in background (non-blocking) ──
@@ -2237,18 +2290,19 @@ DYNAMIC DATE RESOLUTION:
 
     return finalText;
   } catch (err) {
-    console.error('💥 [processWithGemini] Error / Timeout:', err.message);
+    console.error('💥 [processWithGemini] Error / Timeout:', err.message, err.stack);
     const settings = options.settings || (await getClinicSettings().catch(() => ({})));
     const state = conversationStateMap.get(conversationId) || {};
     const fallbackMessage = getContextAwareFallback(state, settings);
 
     try {
       if (!options.skipWhatsAppSend) {
-        await sendWhatsAppMessage(phone, fallbackMessage, settings);
-        console.log(`⚡ [Fallback Dispatched] Context-aware fallback sent in ${state.language || 'en'}: "${fallbackMessage}"`);
+        const waRes = await sendWhatsAppMessage(phone, fallbackMessage, settings);
+        const waMsgId = waRes?.messages?.[0]?.id || 'ok';
+        console.log(`✅ [STEP 4: WA_SENT] (Fallback) MsgID: ${waMsgId} | Lang: ${state.language || 'en'} | To: ${phone}`);
       }
     } catch (fallbackErr) {
-      console.error('[Fallback Send Error]:', fallbackErr.message);
+      console.error('❌ [STEP 4: WA_FAILED] (Fallback):', JSON.stringify(fallbackErr?.response?.data || fallbackErr.message));
     }
 
     if (!options.skipDbSave) {
@@ -2552,6 +2606,9 @@ app.post(['/webhook', '/api/webhook'], async (req, res) => {
       conv = await getOrCreateConversation(from, contactName, messageText, true);
     }
     const conversationId = conv?.id || `temp-${from}`;
+    console.log(
+      `✅ [STEP 2: DB_OK] convId=${conversationId} | ai_mode=${conv?.ai_mode !== false} | hasToken=${Boolean(settings?.meta_access_token)} | hasPhoneId=${Boolean(settings?.meta_phone_number_id)} | hasGeminiKey=${Boolean(settings?.gemini_api_key)} | elapsed=${Date.now() - t0}ms`
+    );
 
     const userMsgRecord = {
       conversation_id: conversationId,
@@ -2589,10 +2646,11 @@ app.post(['/webhook', '/api/webhook'], async (req, res) => {
       const fastGreeting = "Hello! Welcome to Dr. Sharma's Dental Clinic 👋 How can I help you today?";
       const tDispatch0 = Date.now();
       try {
-        await sendWhatsAppMessage(from, fastGreeting, settings);
-        console.log(`⚡ [FAST PATH GREETING] Dispatched in ${Date.now() - t0}ms (WhatsApp API: ${Date.now() - tDispatch0}ms) to ${from}`);
+        const waRes = await sendWhatsAppMessage(from, fastGreeting, settings);
+        const waMsgId = waRes?.messages?.[0]?.id || 'ok';
+        console.log(`✅ [STEP 4: WA_SENT] (Fast Greeting) MsgID: ${waMsgId} | End-to-End: ${Date.now() - t0}ms | WA API: ${Date.now() - tDispatch0}ms | To: ${from}`);
       } catch (sendErr) {
-        console.error('❌ [Fast-Path Greeting Error]:', sendErr?.response?.data || sendErr.message);
+        console.error('❌ [STEP 4: WA_FAILED] (Fast Greeting):', JSON.stringify(sendErr?.response?.data || sendErr.message));
       }
 
       // Persist both messages + update conversation concurrently in background
