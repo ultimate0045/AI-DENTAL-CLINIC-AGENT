@@ -44,6 +44,14 @@ export function isMasked(val: string | undefined | null): boolean {
   return val.includes('••••')
 }
 
+export function sanitizeSecret(val: string | undefined | null, minLen = 8): string {
+  if (!val || typeof val !== 'string') return ''
+  const trimmed = val.trim()
+  if (!trimmed || trimmed.length < minLen) return ''
+  if (trimmed.includes('••••') || /your_|placeholder|changeme|example/i.test(trimmed)) return ''
+  return trimmed
+}
+
 /**
  * Fetch dynamic credentials & knowledge base from Supabase clinic_settings + knowledge_base,
  * falling back to process.env.*. Cached for 60s in memory.
@@ -74,24 +82,24 @@ export async function getDynamicCredentials(forceFresh = false): Promise<Dynamic
 
   // 3. Resolve each credential with priority: clinic_settings -> knowledge_base -> process.env
   const metaAccessToken =
-    settingsRow?.meta_access_token ||
-    kbMetadata?.meta_access_token ||
-    process.env.WHATSAPP_ACCESS_TOKEN ||
-    process.env.META_ACCESS_TOKEN ||
-    process.env.META_WHATSAPP_TOKEN ||
+    sanitizeSecret(settingsRow?.meta_access_token) ||
+    sanitizeSecret(kbMetadata?.meta_access_token) ||
+    sanitizeSecret(process.env.WHATSAPP_ACCESS_TOKEN) ||
+    sanitizeSecret(process.env.META_ACCESS_TOKEN) ||
+    sanitizeSecret(process.env.META_WHATSAPP_TOKEN) ||
     ''
 
   const metaPhoneNumberId =
-    settingsRow?.meta_phone_number_id ||
-    kbMetadata?.meta_phone_number_id ||
-    process.env.META_PHONE_NUMBER_ID ||
-    process.env.WHATSAPP_PHONE_NUMBER_ID ||
+    sanitizeSecret(settingsRow?.meta_phone_number_id, 5) ||
+    sanitizeSecret(kbMetadata?.meta_phone_number_id, 5) ||
+    sanitizeSecret(process.env.META_PHONE_NUMBER_ID, 5) ||
+    sanitizeSecret(process.env.WHATSAPP_PHONE_NUMBER_ID, 5) ||
     ''
 
   const metaVerifyToken =
-    settingsRow?.meta_verify_token ||
-    kbMetadata?.meta_verify_token ||
-    process.env.META_VERIFY_TOKEN ||
+    sanitizeSecret(settingsRow?.meta_verify_token, 3) ||
+    sanitizeSecret(kbMetadata?.meta_verify_token, 3) ||
+    sanitizeSecret(process.env.META_VERIFY_TOKEN, 3) ||
     ''
 
   const googleCalendarId =
@@ -114,9 +122,9 @@ export async function getDynamicCredentials(forceFresh = false): Promise<Dynamic
     ''
 
   const geminiApiKey =
-    settingsRow?.gemini_api_key ||
-    kbMetadata?.gemini_api_key ||
-    process.env.GEMINI_API_KEY ||
+    sanitizeSecret(settingsRow?.gemini_api_key, 20) ||
+    sanitizeSecret(kbMetadata?.gemini_api_key, 20) ||
+    sanitizeSecret(process.env.GEMINI_API_KEY, 20) ||
     ''
 
   const rawGeminiModel =

@@ -310,36 +310,32 @@ export async function processWithGemini(params: GeminiProcessParams): Promise<{
   replyText: string
   bookingCreated?: any
 }> {
-  const apiKey =
-    params.settings?.geminiApiKey ||
-    (params.settings as any)?.gemini_api_key ||
-    process.env.GEMINI_API_KEY
-  if (!apiKey) {
+  const cleanKey = (k?: string) => {
+    if (!k || typeof k !== 'string') return ''
+    const t = k.trim()
+    if (t.length < 20 || t.includes('••••') || /your_|placeholder/i.test(t)) return ''
+    return t
+  }
+  const primaryKey = cleanKey(params.settings?.geminiApiKey || (params.settings as any)?.gemini_api_key)
+  const envKey = cleanKey(process.env.GEMINI_API_KEY)
+  const candidateKeys = Array.from(new Set([primaryKey, envKey].filter(Boolean)))
+  if (candidateKeys.length === 0) {
     throw new Error('GEMINI_API_KEY is not configured in settings or environment variables')
   }
 
-  const genAI = new GoogleGenerativeAI(apiKey)
   const rawModelName =
     params.settings?.geminiModel ||
     (params.settings as any)?.gemini_model ||
     process.env.GEMINI_MODEL ||
     'gemini-2.5-flash-lite'
-  const modelName = /1\.5-flash|3\.5-flash/i.test(rawModelName)
+  const primaryModel = /1\.5-flash|3\.5-flash/i.test(rawModelName)
     ? 'gemini-2.5-flash-lite'
     : rawModelName
+  const candidateModels = Array.from(
+    new Set([primaryModel, 'gemini-2.5-flash-lite', 'gemini-2.5-flash', 'gemini-2.0-flash'])
+  )
 
   const systemInstruction = buildSystemPrompt(params.settings)
-
-  const model = genAI.getGenerativeModel({
-    model: modelName,
-    systemInstruction,
-    tools: [{ functionDeclarations: geminiToolDeclarations }],
-    generationConfig: {
-      maxOutputTokens: 250,
-      temperature: 0.3,
-      thinkingConfig: { thinkingBudget: 0 },
-    } as any,
-  })
 
   const workingHours: WorkingHoursConfig = {
     timingsStart: params.settings.timingsStart || (params.settings as any).timings_start || '09:00',
@@ -357,10 +353,6 @@ export async function processWithGemini(params: GeminiProcessParams): Promise<{
   while (validHistory.length > 0 && validHistory[0].role === 'model') {
     validHistory.shift()
   }
-
-  const chat = model.startChat({
-    history: validHistory,
-  })
 
   // Prepare user message parts
   const userParts: any[] = []
@@ -381,7 +373,39 @@ export async function processWithGemini(params: GeminiProcessParams): Promise<{
     userParts.push({ text: 'Hello' })
   }
 
-  let result = await chat.sendMessage(userParts)
+  let chat: any = null
+  let result: any = null
+  let lastErr: any = null
+
+  keyLoop: for (const keyCandidate of candidateKeys) {
+    const genAI = new GoogleGenerativeAI(keyCandidate)
+    for (const mName of candidateModels) {
+      const supportsThinking = /gemini-2\.5-(flash|pro)$/i.test(mName)
+      try {
+        const model = genAI.getGenerativeModel({
+          model: mName,
+          systemInstruction,
+          tools: [{ functionDeclarations: geminiToolDeclarations }],
+          generationConfig: {
+            maxOutputTokens: 250,
+            temperature: 0.3,
+            ...(supportsThinking ? { thinkingConfig: { thinkingBudget: 0 } } : {}),
+          } as any,
+        })
+        chat = model.startChat({ history: validHistory })
+        result = await chat.sendMessage(userParts)
+        break keyLoop
+      } catch (err: any) {
+        lastErr = err
+        console.warn(`[lib/gemini] Model ${mName} failed:`, err?.message || err)
+      }
+    }
+  }
+
+  if (!result) {
+    throw lastErr || new Error('All Gemini models and keys failed')
+  }
+
   let response = result.response
   let bookingCreatedData: any = null
 

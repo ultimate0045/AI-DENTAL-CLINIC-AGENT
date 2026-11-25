@@ -251,6 +251,14 @@ async function getKnowledgeBaseCache(forceFresh = false) {
   }
 }
 
+function sanitizeSecret(val, minLen = 8) {
+  if (!val || typeof val !== 'string') return '';
+  const trimmed = val.trim();
+  if (!trimmed || trimmed.length < minLen) return '';
+  if (trimmed.includes('••••') || /your_|placeholder|changeme|example/i.test(trimmed)) return '';
+  return trimmed;
+}
+
 async function getClinicSettings(forceFresh = false) {
   const now = Date.now();
   if (!forceFresh && cachedClinicSettings && now < cachedClinicSettingsExpiry) {
@@ -282,22 +290,22 @@ async function getClinicSettings(forceFresh = false) {
       ...(dbData || {}),
       knowledge_base_text: dbData?.knowledge_base_text || kbText || '',
       meta_access_token:
-        dbData?.meta_access_token ||
-        kbMeta?.meta_access_token ||
-        process.env.WHATSAPP_ACCESS_TOKEN ||
-        process.env.META_ACCESS_TOKEN ||
-        process.env.META_WHATSAPP_TOKEN ||
+        sanitizeSecret(dbData?.meta_access_token) ||
+        sanitizeSecret(kbMeta?.meta_access_token) ||
+        sanitizeSecret(process.env.WHATSAPP_ACCESS_TOKEN) ||
+        sanitizeSecret(process.env.META_ACCESS_TOKEN) ||
+        sanitizeSecret(process.env.META_WHATSAPP_TOKEN) ||
         '',
       meta_phone_number_id:
-        dbData?.meta_phone_number_id ||
-        kbMeta?.meta_phone_number_id ||
-        process.env.META_PHONE_NUMBER_ID ||
-        process.env.WHATSAPP_PHONE_NUMBER_ID ||
+        sanitizeSecret(dbData?.meta_phone_number_id, 5) ||
+        sanitizeSecret(kbMeta?.meta_phone_number_id, 5) ||
+        sanitizeSecret(process.env.META_PHONE_NUMBER_ID, 5) ||
+        sanitizeSecret(process.env.WHATSAPP_PHONE_NUMBER_ID, 5) ||
         '',
       meta_verify_token:
-        dbData?.meta_verify_token ||
-        kbMeta?.meta_verify_token ||
-        process.env.META_VERIFY_TOKEN ||
+        sanitizeSecret(dbData?.meta_verify_token, 3) ||
+        sanitizeSecret(kbMeta?.meta_verify_token, 3) ||
+        sanitizeSecret(process.env.META_VERIFY_TOKEN, 3) ||
         '',
       google_calendar_id:
         dbData?.google_calendar_id ||
@@ -315,9 +323,9 @@ async function getClinicSettings(forceFresh = false) {
         process.env.GOOGLE_SERVICE_ACCOUNT_JSON ||
         '',
       gemini_api_key:
-        dbData?.gemini_api_key ||
-        kbMeta?.gemini_api_key ||
-        process.env.GEMINI_API_KEY ||
+        sanitizeSecret(dbData?.gemini_api_key, 20) ||
+        sanitizeSecret(kbMeta?.gemini_api_key, 20) ||
+        sanitizeSecret(process.env.GEMINI_API_KEY, 20) ||
         '',
       gemini_model:
         dbData?.gemini_model ||
@@ -1995,8 +2003,14 @@ DYNAMIC DATE RESOLUTION:
     }
     userParts.push({ text: messageText || '[Patient sent an image]' });
 
-    // Multi-model fast fallback strategy using direct REST API:
-    // Prioritize fastest Flash-Lite / Flash models with thinking disabled
+    // Multi-model + smart API key fallback strategy using direct REST API:
+    const primaryKey = sanitizeSecret(settings.gemini_api_key, 20);
+    const envKey = sanitizeSecret(process.env.GEMINI_API_KEY, 20);
+    const candidateKeys = [...new Set([primaryKey, envKey].filter(Boolean))];
+    if (candidateKeys.length === 0) {
+      throw new Error('No valid GEMINI_API_KEY found in clinic_settings or process.env.GEMINI_API_KEY');
+    }
+
     const configuredModel = settings.gemini_model || process.env.GEMINI_MODEL;
     const isLegacyOrInvalidModel = !configuredModel || /1\.5-flash|3\.5-flash/i.test(configuredModel);
     const candidateModels = [
@@ -2017,31 +2031,40 @@ DYNAMIC DATE RESOLUTION:
 
     let geminiData = null;
     let activeModelName = '';
+    let activeApiKey = candidateKeys[0];
 
-    for (const mName of uniqueCandidateModels) {
-      const tModelStart = Date.now();
-      try {
-        geminiData = await callGeminiRestApi({
-          model: mName,
-          systemPrompt,
-          contents: conversationContents,
-          tools,
-          apiKey: settings.gemini_api_key || process.env.GEMINI_API_KEY,
-          timeoutMs: 8000,
-        });
-        activeModelName = mName;
-        cachedWorkingGeminiModel = mName;
-        console.log(`⚡ [STEP 3: GEMINI_OK] Model ${mName} responded in ${Date.now() - tModelStart}ms (Overall: ${Date.now() - t0}ms)`);
-        break;
-      } catch (modelErr) {
-        const status = modelErr?.response?.status || 'ERR';
-        const errDetail = modelErr?.response?.data?.error?.message || modelErr.message;
-        console.warn(`⚠️ [Gemini Fallback] Model ${mName} failed (${status}) in ${Date.now() - tModelStart}ms: ${errDetail}`);
+    outerLoop: for (const apiKeyCandidate of candidateKeys) {
+      for (const mName of uniqueCandidateModels) {
+        const tModelStart = Date.now();
+        try {
+          geminiData = await callGeminiRestApi({
+            model: mName,
+            systemPrompt,
+            contents: conversationContents,
+            tools,
+            apiKey: apiKeyCandidate,
+            timeoutMs: 7000,
+          });
+          activeModelName = mName;
+          activeApiKey = apiKeyCandidate;
+          cachedWorkingGeminiModel = mName;
+          console.log(`⚡ [STEP 3: GEMINI_OK] Model ${mName} responded in ${Date.now() - tModelStart}ms (Overall: ${Date.now() - t0}ms)`);
+          break outerLoop;
+        } catch (modelErr) {
+          const status = modelErr?.response?.status || 'ERR';
+          const errDetail = modelErr?.response?.data?.error?.message || modelErr.message;
+          console.warn(`⚠️ [Gemini Fallback] Model ${mName} failed (${status}) in ${Date.now() - tModelStart}ms: ${errDetail}`);
+          // If key is rejected (400/401/403/429) and we have another key (e.g. process.env.GEMINI_API_KEY), switch keys immediately
+          if ([400, 401, 403, 429].includes(status) && candidateKeys.length > 1 && apiKeyCandidate !== candidateKeys[candidateKeys.length - 1]) {
+            console.warn(`🔑 [Gemini Key Fallback] Primary key failed with HTTP ${status}, retrying with fallback env GEMINI_API_KEY...`);
+            break;
+          }
+        }
       }
     }
 
     if (!geminiData) {
-      throw new Error('All Gemini model candidates failed to respond within timeout.');
+      throw new Error('All Gemini model and API key candidates failed to respond.');
     }
 
     let finalText = '';
@@ -2251,14 +2274,14 @@ DYNAMIC DATE RESOLUTION:
             systemPrompt,
             contents: conversationContents,
             tools,
-            apiKey: settings.gemini_api_key || process.env.GEMINI_API_KEY,
-            timeoutMs: 10000,
+            apiKey: activeApiKey || envKey || primaryKey,
+            timeoutMs: 7000,
           });
           geminiData = nextData;
           activeModelName = tModel;
           break;
         } catch (turnErr) {
-          console.warn(`[Gemini] Tool turn failed with ${tModel}: ${turnErr.response?.data?.error?.message?.slice(0, 80) || turnErr.message}`);
+          console.warn(`[Gemini] Tool turn failed with ${tModel}: ${turnErr?.response?.data?.error?.message?.slice(0, 80) || turnErr.message}`);
         }
       }
 
@@ -2270,7 +2293,10 @@ DYNAMIC DATE RESOLUTION:
 
     if (!finalText) {
       const cand = geminiData?.candidates?.[0];
-      finalText = cand?.content?.parts?.filter(p => !p.thought).map((p) => p.text || '').join('').trim() || getContextAwareFallback(state, settings);
+      finalText =
+        cand?.content?.parts?.filter((p) => !p.thought).map((p) => p.text || '').join('').trim() ||
+        getContextAwareFallback(state, settings) ||
+        "Thank you for contacting Dr. Sharma's Dental Clinic! Please share your preferred date and time for an appointment. 😊";
     }
 
     // ── 1. Dispatch WhatsApp Message to Patient IMMEDIATELY (Priority 1) ──
@@ -2290,10 +2316,12 @@ DYNAMIC DATE RESOLUTION:
 
     return finalText;
   } catch (err) {
-    console.error('💥 [processWithGemini] Error / Timeout:', err.message, err.stack);
+    console.error('💥 [GEMINI_FATAL]', err?.response?.data || err?.message || err, err?.stack);
     const settings = options.settings || (await getClinicSettings().catch(() => ({})));
     const state = conversationStateMap.get(conversationId) || {};
-    const fallbackMessage = getContextAwareFallback(state, settings);
+    const fallbackMessage =
+      getContextAwareFallback(state, settings) ||
+      "Thank you for contacting Dr. Sharma's Dental Clinic! Please share your preferred date and time for an appointment, and our team will assist you right away. 😊";
 
     try {
       if (!options.skipWhatsAppSend) {

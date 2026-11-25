@@ -171,26 +171,33 @@ export async function POST(request: Request) {
           parts: [{ text: m.content || '' }],
         }))
 
-      const aiResult = await processWithGemini({
-        conversationId: conv.id,
-        patientPhone: normalizedPhone,
-        patientName: conv.patient_name || contactName,
-        messageText: textContent,
-        history: formattedHistory,
-        settings: {
-          ...dynCreds,
-          knowledge_base_text: dynCreds.knowledgeBaseText || '',
-        },
-      })
+      let replyText = ''
+      try {
+        const aiResult = await processWithGemini({
+          conversationId: conv.id,
+          patientPhone: normalizedPhone,
+          patientName: conv.patient_name || contactName,
+          messageText: textContent,
+          history: formattedHistory,
+          settings: {
+            ...dynCreds,
+            knowledge_base_text: dynCreds.knowledgeBaseText || '',
+          },
+        })
+        replyText = aiResult.replyText
+      } catch (geminiErr: any) {
+        console.error('[GEMINI_FATAL]', geminiErr?.response?.data || geminiErr?.message || geminiErr)
+        replyText = `Thank you for reaching out to ${dynCreds.clinicName || "Dr. Sharma's Dental Clinic"}! Please share your preferred date and time for an appointment, and our team will assist you right away. 😊`
+      }
 
       // Send WhatsApp reply FIRST so patient gets immediate response
-      await sendTextMessage(normalizedPhone, aiResult.replyText)
+      await sendTextMessage(normalizedPhone, replyText)
 
       // Persist both messages + update conversation concurrently after sending reply
       const assistantMsgRecord = {
         conversation_id: conv.id,
         role: 'assistant',
-        content: aiResult.replyText,
+        content: replyText,
         message_type: 'text',
         created_at: new Date(Date.now() + 20).toISOString(),
       }
@@ -200,7 +207,7 @@ export async function POST(request: Request) {
           .from('conversations')
           .update({
             phone_number: normalizedPhone,
-            last_message: aiResult.replyText,
+            last_message: replyText,
             last_message_at: new Date().toISOString(),
             ...(contactName && !conv.patient_name ? { patient_name: contactName } : {}),
           })
