@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server'
 import { createAdminClient } from '@/lib/supabase'
+import { getDynamicCredentials } from '@/lib/credentials'
 import { processWithGemini } from '@/lib/gemini'
 import { sendTextMessage, markMessageAsRead } from '@/lib/metaWhatsapp'
 import { normalizePhone } from '@/lib/utils'
@@ -85,36 +86,6 @@ export async function POST(request: Request) {
     inMemoryProcessedIds.add(messageId)
     setTimeout(() => inMemoryProcessedIds.delete(messageId), 60 * 60 * 1000)
 
-    // Layer 2: Persistent Supabase table
-    const supabase = createAdminClient()
-    const { data: existing } = await supabase
-      .from('processed_messages')
-      .select('message_id')
-      .eq('message_id', messageId)
-      .maybeSingle()
-
-    if (existing) {
-      console.log(`[Meta Webhook] Persistent DB duplicate message skipped: ${messageId}`)
-      return NextResponse.json({ status: 'duplicate' }, { status: 200 })
-    }
-
-    await supabase.from('processed_messages').insert({
-      message_id: messageId,
-      processed_at: new Date().toISOString(),
-    })
-
-    // 2. Mark as read on WhatsApp
-    await markMessageAsRead(messageId).catch(() => {})
-
-    // 3. Find or upsert single unified conversation thread per normalized phone number
-    let { data: conv } = await supabase
-      .from('conversations')
-      .select('*')
-      .or(`phone_number.eq.${normalizedPhone},phone_number.eq.+${normalizedPhone}`)
-      .order('created_at', { ascending: true })
-      .limit(1)
-      .maybeSingle()
-
     let textContent = ''
     if (messageType === 'text') {
       textContent = rawMessage.text?.body || ''
@@ -124,8 +95,37 @@ export async function POST(request: Request) {
       textContent = `[Received ${messageType}]`
     }
 
+    // Layer 2: Parallelize dedup check, cached 60s credentials/KB, and conversation lookup
+    const supabase = createAdminClient()
+    const [existingDedupRes, dynCreds, convLookupRes] = await Promise.all([
+      supabase.from('processed_messages').select('message_id').eq('message_id', messageId).maybeSingle(),
+      getDynamicCredentials(),
+      supabase
+        .from('conversations')
+        .select('*')
+        .or(`phone_number.eq.${normalizedPhone},phone_number.eq.+${normalizedPhone}`)
+        .order('created_at', { ascending: true })
+        .limit(1)
+        .maybeSingle(),
+    ])
+
+    if (existingDedupRes?.data) {
+      console.log(`[Meta Webhook] Persistent DB duplicate message skipped: ${messageId}`)
+      return NextResponse.json({ status: 'duplicate' }, { status: 200 })
+    }
+
+    // Fire-and-forget processed_messages insert + mark-as-read (never blocks AI pipeline)
+    Promise.resolve(
+      supabase.from('processed_messages').insert({
+        message_id: messageId,
+        processed_at: new Date().toISOString(),
+      })
+    ).catch(() => {})
+    markMessageAsRead(messageId).catch(() => {})
+
+    // 3. Find or upsert single unified conversation thread per normalized phone number
+    let conv = convLookupRes?.data || null
     if (!conv) {
-      // Upsert using onConflict: 'phone_number' to guarantee single thread per patient
       const { data: newConv } = await supabase
         .from('conversations')
         .upsert(
@@ -142,68 +142,34 @@ export async function POST(request: Request) {
         .select()
         .single()
       conv = newConv
-    } else {
-      const { data: updatedConv } = await supabase
-        .from('conversations')
-        .update({
-          phone_number: normalizedPhone, // Normalize if legacy had '+'
-          last_message: textContent,
-          last_message_at: new Date().toISOString(),
-          unread_count: (conv.unread_count || 0) + 1,
-          ...(contactName && !conv.patient_name ? { patient_name: contactName } : {}),
-        })
-        .eq('id', conv.id)
-        .select()
-        .single()
-      if (updatedConv) conv = updatedConv
     }
 
     if (!conv) return NextResponse.json({ status: 'ok' }, { status: 200 })
 
-    // 4. Save inbound message into chat_messages
-    await supabase.from('chat_messages').insert({
+    const userMsgRecord = {
       conversation_id: conv.id,
       role: 'user',
       content: textContent,
       message_type: messageType,
       whatsapp_message_id: messageId,
       created_at: new Date().toISOString(),
-    })
+    }
 
-    // 5. If AI Mode is enabled, process with Gemini 2.5 Flash and reply via Meta WhatsApp
+    // 5. If AI Mode is enabled, fetch recent 8 messages, generate reply, send WhatsApp FIRST, then save logs
     if (conv.ai_mode !== false) {
-      // Fetch clinic settings
-      const { data: settingsRow } = await supabase.from('clinic_settings').select('*').limit(1).maybeSingle()
-      const activeSettings = {
-        clinicName: settingsRow?.clinic_name || process.env.CLINIC_NAME || 'SmileCare Dental & Implant Clinic',
-        doctorName: settingsRow?.doctor_name || process.env.CLINIC_DOCTOR || 'Dr. A. Sharma (BDS, MDS)',
-        address: settingsRow?.address || process.env.CLINIC_ADDRESS || 'Suite 402, Dental Care Plaza',
-        phone: settingsRow?.phone || process.env.CLINIC_PHONE || '+91 98765 43210',
-        timingsStart: (settingsRow?.timings_start || process.env.CLINIC_TIMINGS_START || '09:00').slice(0, 5),
-        timingsEnd: (settingsRow?.timings_end || process.env.CLINIC_TIMINGS_END || '18:00').slice(0, 5),
-        lunchStart: (settingsRow?.lunch_start || process.env.CLINIC_LUNCH_START || '13:00').slice(0, 5),
-        lunchEnd: (settingsRow?.lunch_end || process.env.CLINIC_LUNCH_END || '14:00').slice(0, 5),
-        weeklyOff: settingsRow?.weekly_off || process.env.CLINIC_WEEKLY_OFF || 'Sunday',
-        consultationFee: settingsRow?.consultation_fee ?? Number(process.env.CLINIC_CONSULTATION_FEE || 500),
-        googleSheetId: settingsRow?.google_sheet_id || process.env.GOOGLE_SHEET_ID || '',
-        googleCalendarId: settingsRow?.google_calendar_id || process.env.GOOGLE_CALENDAR_ID || '',
-        services: settingsRow?.services || [],
-        faqs: settingsRow?.faqs || [],
-        knowledge_base_text: settingsRow?.knowledge_base_text || '',
-      }
-
-      // Fetch message history for context
       const { data: pastMessages } = await supabase
         .from('chat_messages')
         .select('role, content')
         .eq('conversation_id', conv.id)
-        .order('created_at', { ascending: true })
-        .limit(10)
+        .order('created_at', { ascending: false })
+        .limit(8)
 
-      const formattedHistory = (pastMessages || []).slice(0, -1).map((m) => ({
-        role: m.role === 'assistant' ? ('model' as const) : ('user' as const),
-        parts: [{ text: m.content || '' }],
-      }))
+      const formattedHistory = (pastMessages || [])
+        .reverse()
+        .map((m) => ({
+          role: m.role === 'assistant' ? ('model' as const) : ('user' as const),
+          parts: [{ text: m.content || '' }],
+        }))
 
       const aiResult = await processWithGemini({
         conversationId: conv.id,
@@ -211,29 +177,50 @@ export async function POST(request: Request) {
         patientName: conv.patient_name || contactName,
         messageText: textContent,
         history: formattedHistory,
-        settings: activeSettings,
+        settings: {
+          ...dynCreds,
+          knowledge_base_text: dynCreds.knowledgeBaseText || '',
+        },
       })
 
-      // Send WhatsApp reply back to patient via Meta Cloud API
+      // Send WhatsApp reply FIRST so patient gets immediate response
       await sendTextMessage(normalizedPhone, aiResult.replyText)
 
-      // Save AI reply into chat_messages
-      await supabase.from('chat_messages').insert({
+      // Persist both messages + update conversation concurrently after sending reply
+      const assistantMsgRecord = {
         conversation_id: conv.id,
         role: 'assistant',
         content: aiResult.replyText,
         message_type: 'text',
-        created_at: new Date().toISOString(),
-      })
-
-      // Update conversation
-      await supabase
-        .from('conversations')
-        .update({
-          last_message: aiResult.replyText,
-          last_message_at: new Date().toISOString(),
-        })
-        .eq('id', conv.id)
+        created_at: new Date(Date.now() + 20).toISOString(),
+      }
+      await Promise.allSettled([
+        supabase.from('chat_messages').insert([userMsgRecord, assistantMsgRecord]),
+        supabase
+          .from('conversations')
+          .update({
+            phone_number: normalizedPhone,
+            last_message: aiResult.replyText,
+            last_message_at: new Date().toISOString(),
+            ...(contactName && !conv.patient_name ? { patient_name: contactName } : {}),
+          })
+          .eq('id', conv.id),
+      ])
+    } else {
+      // Human mode: save incoming message and update conversation
+      await Promise.allSettled([
+        supabase.from('chat_messages').insert(userMsgRecord),
+        supabase
+          .from('conversations')
+          .update({
+            phone_number: normalizedPhone,
+            last_message: textContent,
+            last_message_at: new Date().toISOString(),
+            unread_count: (conv.unread_count || 0) + 1,
+            ...(contactName && !conv.patient_name ? { patient_name: contactName } : {}),
+          })
+          .eq('id', conv.id),
+      ])
     }
 
     return NextResponse.json({ status: 'processed' }, { status: 200 })

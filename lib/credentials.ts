@@ -19,11 +19,12 @@ export interface DynamicCredentials {
   lunchEnd: string
   weeklyOff: string
   consultationFee: number
+  knowledgeBaseText?: string
 }
 
 let cachedCredentials: DynamicCredentials | null = null
 let cacheExpiresAt = 0
-const CACHE_TTL_MS = 30 * 1000 // 30 seconds
+const CACHE_TTL_MS = 60 * 1000 // 60 seconds
 
 export function invalidateCredentialsCache() {
   cachedCredentials = null
@@ -44,8 +45,8 @@ export function isMasked(val: string | undefined | null): boolean {
 }
 
 /**
- * Fetch dynamic credentials from Supabase clinic_settings + knowledge_base fallback,
- * falling back to process.env.*. Cached for 30s in memory.
+ * Fetch dynamic credentials & knowledge base from Supabase clinic_settings + knowledge_base,
+ * falling back to process.env.*. Cached for 60s in memory.
  */
 export async function getDynamicCredentials(forceFresh = false): Promise<DynamicCredentials> {
   const now = Date.now()
@@ -55,33 +56,21 @@ export async function getDynamicCredentials(forceFresh = false): Promise<Dynamic
 
   const supabase = createAdminClient()
 
-  // 1. Fetch clinic_settings row
-  let settingsRow: any = null
-  try {
-    const { data } = await supabase
-      .from('clinic_settings')
-      .select('*')
-      .limit(1)
-      .maybeSingle()
-    settingsRow = data
-  } catch (err: any) {
-    console.warn('[Credentials] Warning querying clinic_settings:', err?.message)
-  }
+  // Fetch clinic_settings and knowledge_base concurrently in one Promise.all
+  const [settingsRes, kbRes] = await Promise.all([
+    Promise.resolve(supabase.from('clinic_settings').select('*').limit(1).maybeSingle()).catch(() => ({ data: null })),
+    Promise.resolve(supabase.from('knowledge_base').select('source_name, content, metadata').limit(20)).catch(() => ({ data: [] })),
+  ])
 
-  // 2. Fetch knowledge_base fallback row for credentials (source_name = 'clinic_integrations')
-  let kbMetadata: any = {}
-  try {
-    const { data } = await supabase
-      .from('knowledge_base')
-      .select('metadata')
-      .eq('source_name', 'clinic_integrations')
-      .maybeSingle()
-    if (data?.metadata) {
-      kbMetadata = data.metadata
-    }
-  } catch (err: any) {
-    // ignore
-  }
+  const settingsRow: any = settingsRes?.data || null
+  const kbRows: any[] = Array.isArray(kbRes?.data) ? kbRes.data : []
+  const integrationRow = kbRows.find((r) => r.source_name === 'clinic_integrations')
+  const kbMetadata: any = integrationRow?.metadata || {}
+  const kbText = kbRows
+    .filter((r) => r.source_name !== 'clinic_integrations' && r.content)
+    .map((r) => r.content)
+    .join('\n')
+    .slice(0, 4000)
 
   // 3. Resolve each credential with priority: clinic_settings -> knowledge_base -> process.env
   const metaAccessToken =
@@ -130,11 +119,14 @@ export async function getDynamicCredentials(forceFresh = false): Promise<Dynamic
     process.env.GEMINI_API_KEY ||
     ''
 
-  const geminiModel =
+  const rawGeminiModel =
     settingsRow?.gemini_model ||
     kbMetadata?.gemini_model ||
     process.env.GEMINI_MODEL ||
-    'gemini-1.5-flash'
+    'gemini-2.5-flash-lite'
+  const geminiModel = /1\.5-flash|3\.5-flash/i.test(rawGeminiModel)
+    ? 'gemini-2.5-flash-lite'
+    : rawGeminiModel
 
   const credentials: DynamicCredentials = {
     metaAccessToken,
@@ -155,6 +147,7 @@ export async function getDynamicCredentials(forceFresh = false): Promise<Dynamic
     lunchEnd: (settingsRow?.lunch_end || process.env.CLINIC_LUNCH_END || '14:00').slice(0, 5),
     weeklyOff: settingsRow?.weekly_off || process.env.CLINIC_WEEKLY_OFF || 'Sunday',
     consultationFee: Number(settingsRow?.consultation_fee ?? process.env.CLINIC_CONSULTATION_FEE ?? 500),
+    knowledgeBaseText: settingsRow?.knowledge_base_text || kbText || '',
   }
 
   cachedCredentials = credentials

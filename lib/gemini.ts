@@ -319,11 +319,14 @@ export async function processWithGemini(params: GeminiProcessParams): Promise<{
   }
 
   const genAI = new GoogleGenerativeAI(apiKey)
-  const modelName =
+  const rawModelName =
     params.settings?.geminiModel ||
     (params.settings as any)?.gemini_model ||
     process.env.GEMINI_MODEL ||
-    'gemini-3.5-flash'
+    'gemini-2.5-flash-lite'
+  const modelName = /1\.5-flash|3\.5-flash/i.test(rawModelName)
+    ? 'gemini-2.5-flash-lite'
+    : rawModelName
 
   const systemInstruction = buildSystemPrompt(params.settings)
 
@@ -332,7 +335,7 @@ export async function processWithGemini(params: GeminiProcessParams): Promise<{
     systemInstruction,
     tools: [{ functionDeclarations: geminiToolDeclarations }],
     generationConfig: {
-      maxOutputTokens: 300,
+      maxOutputTokens: 250,
       temperature: 0.3,
       thinkingConfig: { thinkingBudget: 0 },
     } as any,

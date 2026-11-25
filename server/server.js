@@ -12,6 +12,7 @@ import { createClient } from '@supabase/supabase-js';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import { google } from 'googleapis';
 import axios from 'axios';
+import https from 'https';
 import { v4 as uuidv4 } from 'uuid';
 import multer from 'multer';
 import fs from 'fs';
@@ -34,6 +35,12 @@ dotenv.config({ path: join(__dirname, '../.env.local') });
 const PORT = process.env.PORT || 3001;
 const FRONTEND_URL = process.env.FRONTEND_URL || process.env.NEXT_PUBLIC_CLIENT_URL || 'http://localhost:3000';
 const META_GRAPH_URL = 'https://graph.facebook.com/v19.0';
+
+// Warm HTTP Keep-Alive client for low-latency Meta & Gemini API calls
+const fastHttp = axios.create({
+  httpsAgent: new https.Agent({ keepAlive: true, maxSockets: 50 }),
+  headers: { 'Content-Type': 'application/json' },
+});
 
 // ─── Dynamic CORS Configuration for Vercel & Cloud Deployments ───────────────
 const allowedOrigins = [
@@ -210,15 +217,38 @@ function getSheetsClient(serviceAccountJson) {
   return google.sheets({ version: 'v4', auth });
 }
 
-// ─── Helper: Get Clinic Settings & Dynamic Credentials (Cached 30s) ───────────
+// ─── Helper: Get Clinic Settings & Knowledge Base (Cached 60s) ────────────────
 let cachedClinicSettings = null;
 let cachedClinicSettingsExpiry = 0;
-const SETTINGS_CACHE_TTL = 30 * 1000; // 30 seconds
+let cachedKnowledgeBase = null;
+let cachedKnowledgeBaseExpiry = 0;
+const SETTINGS_CACHE_TTL = 60 * 1000; // 60 seconds
+const KB_CACHE_TTL = 60 * 1000; // 60 seconds
 
 function invalidateClinicSettingsCache() {
   cachedClinicSettings = null;
   cachedClinicSettingsExpiry = 0;
-  console.log('🔄 [Cache] Dynamic credentials & clinic settings cache cleared.');
+  cachedKnowledgeBase = null;
+  cachedKnowledgeBaseExpiry = 0;
+  console.log('🔄 [Cache] Dynamic credentials, clinic settings & knowledge base cache cleared.');
+}
+
+async function getKnowledgeBaseCache(forceFresh = false) {
+  const now = Date.now();
+  if (!forceFresh && cachedKnowledgeBase !== null && now < cachedKnowledgeBaseExpiry) {
+    return cachedKnowledgeBase;
+  }
+  try {
+    const { data: kbRows } = await supabase
+      .from('knowledge_base')
+      .select('source_name, content, metadata')
+      .limit(20);
+    cachedKnowledgeBase = kbRows || [];
+    cachedKnowledgeBaseExpiry = now + KB_CACHE_TTL;
+    return cachedKnowledgeBase;
+  } catch {
+    return cachedKnowledgeBase || [];
+  }
 }
 
 async function getClinicSettings(forceFresh = false) {
@@ -227,25 +257,30 @@ async function getClinicSettings(forceFresh = false) {
     return cachedClinicSettings;
   }
   try {
-    const { data: dbData } = await supabase
-      .from('clinic_settings')
-      .select('*')
-      .limit(1)
-      .maybeSingle();
+    // Fetch clinic_settings and knowledge_base concurrently in one Promise.all
+    const [settingsRes, kbRows] = await Promise.all([
+      supabase.from('clinic_settings').select('*').limit(1).maybeSingle(),
+      getKnowledgeBaseCache(forceFresh),
+    ]);
 
-    // Also fetch knowledge_base fallback row for dynamic integrations (source_name = 'clinic_integrations')
-    let kbMeta = {};
-    try {
-      const { data: kbRow } = await supabase
-        .from('knowledge_base')
-        .select('metadata')
-        .eq('source_name', 'clinic_integrations')
-        .maybeSingle();
-      if (kbRow?.metadata) kbMeta = kbRow.metadata;
-    } catch {}
+    const dbData = settingsRes?.data || null;
+    const integrationRow = Array.isArray(kbRows)
+      ? kbRows.find((r) => r.source_name === 'clinic_integrations')
+      : null;
+    const kbMeta = integrationRow?.metadata || {};
+
+    // Extract any uploaded KB text snippets (excluding clinic_integrations metadata row)
+    const kbText = Array.isArray(kbRows)
+      ? kbRows
+          .filter((r) => r.source_name !== 'clinic_integrations' && r.content)
+          .map((r) => r.content)
+          .join('\n')
+          .slice(0, 4000)
+      : '';
 
     const resolved = {
       ...(dbData || {}),
+      knowledge_base_text: dbData?.knowledge_base_text || kbText || '',
       meta_access_token:
         dbData?.meta_access_token ||
         kbMeta?.meta_access_token ||
@@ -288,7 +323,7 @@ async function getClinicSettings(forceFresh = false) {
         dbData?.gemini_model ||
         kbMeta?.gemini_model ||
         process.env.GEMINI_MODEL ||
-        'gemini-1.5-flash',
+        'gemini-2.5-flash-lite',
       clinic_name: dbData?.clinic_name || process.env.CLINIC_NAME || 'Dental Care Clinic',
       doctor_name: dbData?.doctor_name || process.env.CLINIC_DOCTOR || 'Dr. Sharma',
       address: dbData?.address || process.env.CLINIC_ADDRESS || '123 Medical Enclave',
@@ -322,6 +357,7 @@ async function getClinicSettings(forceFresh = false) {
       meta_phone_number_id: process.env.META_PHONE_NUMBER_ID || '',
       meta_verify_token: process.env.META_VERIFY_TOKEN || '',
       gemini_api_key: process.env.GEMINI_API_KEY || '',
+      gemini_model: process.env.GEMINI_MODEL || 'gemini-2.5-flash-lite',
     };
     cachedClinicSettings = fallback;
     cachedClinicSettingsExpiry = now + SETTINGS_CACHE_TTL;
@@ -523,14 +559,24 @@ async function getOrCreateConversation(phoneInput, patientNameInput, lastMessage
 }
 
 // ─── Helper: Send WhatsApp Message ───────────────────────────────────────────
-async function sendWhatsAppMessage(phone, text) {
+async function sendWhatsAppMessage(phone, text, preloadedSettings = null) {
   try {
     const messageBody = text ? text.trim() : '';
     const cleanPhone = normalizePhoneNumber(phone);
-    const phoneId = await getMetaPhoneNumberId();
-    const token = await getMetaAccessToken();
+    const settings = preloadedSettings || (await getClinicSettings());
+    const phoneId =
+      settings?.meta_phone_number_id ||
+      process.env.META_PHONE_NUMBER_ID ||
+      process.env.WHATSAPP_PHONE_NUMBER_ID ||
+      '';
+    const token =
+      settings?.meta_access_token ||
+      process.env.WHATSAPP_ACCESS_TOKEN ||
+      process.env.META_ACCESS_TOKEN ||
+      process.env.META_WHATSAPP_TOKEN ||
+      '';
     const url = `${META_GRAPH_URL}/${phoneId}/messages`;
-    const response = await axios.post(
+    const response = await fastHttp.post(
       url,
       {
         messaging_product: 'whatsapp',
@@ -544,6 +590,7 @@ async function sendWhatsAppMessage(phone, text) {
           Authorization: `Bearer ${token}`,
           'Content-Type': 'application/json',
         },
+        timeout: 8000,
       }
     );
     return response.data;
@@ -551,6 +598,44 @@ async function sendWhatsAppMessage(phone, text) {
     console.error('[sendWhatsAppMessage] Error:', err?.response?.data || err.message);
     throw err;
   }
+}
+
+// Fire-and-forget WhatsApp mark-as-read (never blocks AI pipeline)
+function markWhatsAppMessageAsRead(messageId, preloadedSettings = null) {
+  if (!messageId) return;
+  (async () => {
+    try {
+      const settings = preloadedSettings || (await getClinicSettings());
+      const phoneId =
+        settings?.meta_phone_number_id ||
+        process.env.META_PHONE_NUMBER_ID ||
+        process.env.WHATSAPP_PHONE_NUMBER_ID ||
+        '';
+      const token =
+        settings?.meta_access_token ||
+        process.env.WHATSAPP_ACCESS_TOKEN ||
+        process.env.META_ACCESS_TOKEN ||
+        process.env.META_WHATSAPP_TOKEN ||
+        '';
+      if (phoneId && token) {
+        await fastHttp.post(
+          `${META_GRAPH_URL}/${phoneId}/messages`,
+          {
+            messaging_product: 'whatsapp',
+            status: 'read',
+            message_id: messageId,
+          },
+          {
+            headers: {
+              Authorization: `Bearer ${token}`,
+              'Content-Type': 'application/json',
+            },
+            timeout: 4000,
+          }
+        );
+      }
+    } catch {}
+  })().catch(() => {});
 }
 
 // ─── Real-Time Date & Natural Language Helpers ─────────────────────────────────
@@ -993,26 +1078,27 @@ async function checkAvailability(rawDate, settings) {
       allSlots.push(`${hh}:${mm}`);
     }
 
-    // 3. Busy slots from Google Calendar (via fast in-memory cache)
+    // 3 & 4. Fetch busy slots from Google Calendar & Supabase appointments concurrently
     const calendarId = settings.google_calendar_id || process.env.GOOGLE_CALENDAR_ID;
-    const busySlots = await getCachedGoogleCalendarBusySlots(date, calendarId);
+    const [busySlots, dbBookedRes] = await Promise.all([
+      getCachedGoogleCalendarBusySlots(date, calendarId),
+      Promise.resolve(
+        supabase
+          .from('appointments')
+          .select('time_slot')
+          .eq('appointment_date', date)
+          .neq('status', 'Cancelled')
+      ).catch((dbErr) => {
+        console.warn('[checkAvailability] Supabase appointments lookup failed:', dbErr?.message);
+        return { data: null };
+      }),
+    ]);
 
-    // 4. Busy slots from Supabase appointments table
-    try {
-      const { data: bookedRows, error: dbErr } = await supabase
-        .from('appointments')
-        .select('time_slot')
-        .eq('appointment_date', date)
-        .neq('status', 'Cancelled');
-
-      if (!dbErr && bookedRows) {
-        for (const row of bookedRows) {
-          const cleanSlot = row.time_slot.trim().split(' ')[0];
-          busySlots.add(cleanSlot);
-        }
+    if (dbBookedRes?.data) {
+      for (const row of dbBookedRes.data) {
+        const cleanSlot = row.time_slot.trim().split(' ')[0];
+        busySlots.add(cleanSlot);
       }
-    } catch (dbErr) {
-      console.warn('[checkAvailability] Supabase appointments lookup failed:', dbErr.message);
     }
 
     // 5. If date is TODAY, filter out slots that have already passed
@@ -1395,15 +1481,21 @@ function getContextAwareFallback(state, settings) {
   }
 }
 
-// ─── Direct Gemini REST API Caller ──────────────────────────────────────────
-async function callGeminiRestApi({ model, systemPrompt, contents, tools, apiKey, timeoutMs = 10000 }) {
+// ─── Direct Gemini REST API Caller (Low-Latency Keep-Alive + No Thinking) ────
+let cachedWorkingGeminiModel = null;
+
+async function callGeminiRestApi({ model, systemPrompt, contents, tools, apiKey, timeoutMs = 8000 }) {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+  const supportsThinkingConfig = /2\.5|3\.|flash-lite-latest|thinking/i.test(model);
+  const generationConfig = {
+    maxOutputTokens: 250,
+    temperature: 0.3,
+    ...(supportsThinkingConfig ? { thinkingConfig: { thinkingBudget: 0 } } : {}),
+  };
+
   const payload = {
     contents,
-    generationConfig: {
-      maxOutputTokens: 300,
-      temperature: 0.3,
-    },
+    generationConfig,
   };
   if (systemPrompt) {
     payload.systemInstruction = {
@@ -1414,19 +1506,29 @@ async function callGeminiRestApi({ model, systemPrompt, contents, tools, apiKey,
     payload.tools = tools;
   }
 
-  const response = await axios.post(url, payload, {
-    headers: { 'Content-Type': 'application/json' },
-    timeout: timeoutMs,
-  });
-
-  return response.data;
+  try {
+    const response = await fastHttp.post(url, payload, {
+      headers: { 'Content-Type': 'application/json' },
+      timeout: timeoutMs,
+    });
+    return response.data;
+  } catch (err) {
+    const errMsg = err?.response?.data?.error?.message || '';
+    if (supportsThinkingConfig && err?.response?.status === 400 && /thinking/i.test(errMsg)) {
+      delete payload.generationConfig.thinkingConfig;
+      const retryRes = await fastHttp.post(url, payload, {
+        headers: { 'Content-Type': 'application/json' },
+        timeout: timeoutMs,
+      });
+      return retryRes.data;
+    }
+    throw err;
+  }
 }
 
 // ─── Gemini AI Processing ─────────────────────────────────────────────────────
-async function processWithGemini(conversationId, phone, messageText, messageType, imageUrl, t0 = Date.now()) {
-  const startTime = Date.now();
+async function processWithGemini(conversationId, phone, messageText, messageType, imageUrl, t0 = Date.now(), options = {}) {
   try {
-    const settings = await getClinicSettings();
     const dateCtx = getRealtimeDateContext();
 
     // Retrieve or initialize in-memory booking state for this conversation
@@ -1447,43 +1549,93 @@ async function processWithGemini(conversationId, phone, messageText, messageType
       conversationStateMap.set(conversationId, state);
     }
 
-    // Check Supabase if this user already has an active confirmed booking
-    if (!state.is_booked && phone) {
-      try {
-        const { data: existingAppt } = await supabase
-          .from('appointments')
-          .select('booking_id, patient_name, patient_phone, dental_issue, appointment_date, time_slot')
-          .eq('patient_phone', phone)
-          .neq('status', 'Cancelled')
-          .order('created_at', { ascending: false })
-          .limit(1)
-          .maybeSingle();
+    // Parallelize cached settings + recent 8 chat_messages + active appointment lookup in ONE Promise.all
+    const [settings, historyRes, apptRes] = await Promise.all([
+      options.settings ? Promise.resolve(options.settings) : getClinicSettings(),
+      options.historyRows
+        ? Promise.resolve({ data: options.historyRows })
+        : Promise.resolve(
+            supabase
+              .from('chat_messages')
+              .select('role, content')
+              .eq('conversation_id', conversationId)
+              .order('created_at', { ascending: false })
+              .limit(8)
+          ).catch(() => ({ data: [] })),
+      !state.is_booked && phone
+        ? Promise.resolve(
+            supabase
+              .from('appointments')
+              .select('booking_id, patient_name, patient_phone, dental_issue, appointment_date, time_slot')
+              .eq('patient_phone', phone)
+              .neq('status', 'Cancelled')
+              .order('created_at', { ascending: false })
+              .limit(1)
+              .maybeSingle()
+          ).catch(() => ({ data: null }))
+        : Promise.resolve({ data: null }),
+    ]);
 
-        if (existingAppt && existingAppt.booking_id) {
-          state.is_booked = true;
-          state.booking_id = existingAppt.booking_id;
-          state.patient_name = state.patient_name || existingAppt.patient_name;
-          state.patient_phone = state.patient_phone || existingAppt.patient_phone;
-          state.dental_issue = state.dental_issue || existingAppt.dental_issue;
-          state.date = state.date || existingAppt.appointment_date;
-          state.time_slot = state.time_slot || existingAppt.time_slot;
-          console.log(`📌 [Existing Booking Recovered] Booking ID: ${state.booking_id} for ${state.date} at ${state.time_slot}`);
-        }
-      } catch (dbErr) {
-        // Continue with memory state
-      }
+    const existingAppt = apptRes?.data;
+    if (existingAppt && existingAppt.booking_id) {
+      state.is_booked = true;
+      state.booking_id = existingAppt.booking_id;
+      state.patient_name = state.patient_name || existingAppt.patient_name;
+      state.patient_phone = state.patient_phone || existingAppt.patient_phone;
+      state.dental_issue = state.dental_issue || existingAppt.dental_issue;
+      state.date = state.date || existingAppt.appointment_date;
+      state.time_slot = state.time_slot || existingAppt.time_slot;
+      console.log(`📌 [Existing Booking Recovered] Booking ID: ${state.booking_id} for ${state.date} at ${state.time_slot}`);
     }
+
+    // Helper: persist logs + update conversation concurrently in background AFTER WhatsApp send
+    const persistTurnInBackground = (replyText) => {
+      if (options.skipDbSave) return;
+      const nowIso = new Date().toISOString();
+      const assistantMsgRecord = {
+        conversation_id: conversationId,
+        role: 'assistant',
+        content: replyText,
+        message_type: 'text',
+        created_at: new Date(Date.now() + 20).toISOString(),
+      };
+
+      try {
+        io.to(conversationId).emit('new_message', assistantMsgRecord);
+      } catch {}
+
+      const rowsToInsert = options.userMessageRecord
+        ? [options.userMessageRecord, assistantMsgRecord]
+        : [assistantMsgRecord];
+
+      const convUpdates = {
+        last_message: replyText,
+        last_message_at: nowIso,
+        ...(phone ? { phone_number: phone } : {}),
+        ...(options.contactName && (!options.conv?.patient_name || options.conv.patient_name === 'Patient')
+          ? { patient_name: options.contactName }
+          : {}),
+      };
+
+      Promise.allSettled([
+        supabase.from('chat_messages').insert(rowsToInsert),
+        supabase.from('conversations').update(convUpdates).eq('id', conversationId),
+      ]).catch(() => {});
+    };
 
     // Fast path: Strict English-only greeting (sub-millisecond, no Gemini call)
     if (messageType === 'text' && isBasicGreeting(messageText)) {
       const fastGreeting = "Hello! Welcome to Dr. Sharma's Dental Clinic 👋 How can I help you today?";
       const tDispatch = Date.now();
       try {
-        await sendWhatsAppMessage(phone, fastGreeting);
-        console.log(`⚡ [Fast-Path Greeting] Dispatched in ${Date.now() - tDispatch}ms to ${phone}`);
+        if (!options.skipWhatsAppSend) {
+          await sendWhatsAppMessage(phone, fastGreeting, settings);
+          console.log(`⚡ [Fast-Path Greeting] Dispatched in ${Date.now() - tDispatch}ms to ${phone}`);
+        }
       } catch (metaErr) {
         console.warn('[processWithGemini Fast Greeting Error]:', metaErr.message);
       }
+      persistTurnInBackground(fastGreeting);
       return fastGreeting;
     }
 
@@ -1500,38 +1652,16 @@ async function processWithGemini(conversationId, phone, messageText, messageType
       console.log(`⚡ [POST-BOOKING ACKNOWLEDGMENT] Dispatched in ${Date.now() - t0}ms to ${phone}`);
       const tDispatch = Date.now();
       try {
-        await sendWhatsAppMessage(phone, ackReply);
-        console.log(`⚡ [Ack Dispatch API] Dispatched in ${Date.now() - tDispatch}ms`);
+        if (!options.skipWhatsAppSend) {
+          await sendWhatsAppMessage(phone, ackReply, settings);
+          console.log(`⚡ [Ack Dispatch API] Dispatched in ${Date.now() - tDispatch}ms`);
+        }
       } catch (metaErr) {
         console.warn('[processWithGemini Ack Error]:', metaErr.message);
       }
-
-      // Background tracking to DB and Socket
-      (async () => {
-        try {
-          await supabase.from('chat_messages').insert({
-            conversation_id: conversationId,
-            role: 'assistant',
-            content: ackReply,
-            message_type: 'text',
-            created_at: new Date().toISOString(),
-          });
-          io.to(conversationId).emit('new_message', {
-            conversation_id: conversationId,
-            role: 'assistant',
-            content: ackReply,
-            message_type: 'text',
-            created_at: new Date().toISOString(),
-          });
-        } catch (dbErr) {
-          console.warn('[Ack DB Tracking Error]:', dbErr.message);
-        }
-      })().catch(console.warn);
-
+      persistTurnInBackground(ackReply);
       return ackReply;
     }
-
-    const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
     // Build system prompt enforcing:
     // 1. Natural Language Detection (English vs Hinglish) matching patient naturally on every turn
@@ -1692,17 +1822,20 @@ EXAMPLES OF CONFIRMATION MESSAGES:
 DYNAMIC DATE RESOLUTION:
 - Automatically resolve "today", "tomorrow", "kal", "parso", "15th Nov", "20 November" into YYYY-MM-DD format based on Today (${dateCtx.todayStr}).
 - NEVER ask the patient what year it is or ask for "YYYY-MM-DD".
-- If checking today (${dateCtx.todayStr}), notice that clinic is closed on ${settings.weekly_off || 'Sunday'}s. If today is Sunday, explain warmly that clinic is closed on Sundays and offer slots for tomorrow (Monday)!`;
+- If checking today (${dateCtx.todayStr}), notice that clinic is closed on ${settings.weekly_off || 'Sunday'}s. If today is Sunday, explain warmly that clinic is closed on Sundays and offer slots for tomorrow (Monday)!${settings.knowledge_base_text ? `\n\nCLINIC KNOWLEDGE BASE:\n${settings.knowledge_base_text}` : ''}`;
 
-    // Fetch previous messages for conversation history (last 10 messages gives full context)
-    const { data: historyRows } = await supabase
-      .from('chat_messages')
-      .select('role, content')
-      .eq('conversation_id', conversationId)
-      .order('created_at', { ascending: false })
-      .range(1, 10);
+    // Build history from parallel-fetched last 8 messages (no extra DB round-trip!)
+    const rawHistoryRows = Array.isArray(historyRes?.data) ? [...historyRes.data] : [];
+    // If the latest row already equals the current incoming user message (e.g. simulate route), drop it so it isn't duplicated
+    if (
+      rawHistoryRows.length > 0 &&
+      rawHistoryRows[0]?.role === 'user' &&
+      rawHistoryRows[0]?.content === messageText
+    ) {
+      rawHistoryRows.shift();
+    }
 
-    const history = (historyRows || [])
+    const history = rawHistoryRows
       .reverse()
       .map((m) => ({
         role: m.role === 'assistant' ? 'model' : 'user',
@@ -1797,10 +1930,11 @@ DYNAMIC DATE RESOLUTION:
     const userParts = [];
     if (messageType === 'image' && imageUrl) {
       try {
-        const metaToken = await getMetaAccessToken();
-        const imgResponse = await axios.get(imageUrl, {
+        const metaToken = settings.meta_access_token || (await getMetaAccessToken());
+        const imgResponse = await fastHttp.get(imageUrl, {
           responseType: 'arraybuffer',
           headers: { Authorization: `Bearer ${metaToken}` },
+          timeout: 6000,
         });
         const base64 = Buffer.from(imgResponse.data).toString('base64');
         const mimeType = imgResponse.headers['content-type'] || 'image/jpeg';
@@ -1811,18 +1945,16 @@ DYNAMIC DATE RESOLUTION:
     }
     userParts.push({ text: messageText || '[Patient sent an image]' });
 
-    // Multi-model fallback strategy using direct REST API:
-    // 1. GEMINI_MODEL (settings, .env, or default gemini-3.5-flash-lite)
-    // 2. gemini-3.5-flash-lite (sub-1s latency, active quota)
-    // 3. gemini-flash-lite-latest
-    // 4. gemini-3.5-flash
-    // 5. gemini-2.5-flash
+    // Multi-model fast fallback strategy using direct REST API:
+    // Prioritize fastest Flash-Lite / Flash models with thinking disabled
+    const configuredModel = settings.gemini_model || process.env.GEMINI_MODEL;
+    const isLegacyOrInvalidModel = !configuredModel || /1\.5-flash|3\.5-flash/i.test(configuredModel);
     const candidateModels = [
-      settings.gemini_model || process.env.GEMINI_MODEL || 'gemini-3.5-flash-lite',
-      'gemini-3.5-flash-lite',
-      'gemini-flash-lite-latest',
-      'gemini-3.5-flash',
+      ...(cachedWorkingGeminiModel ? [cachedWorkingGeminiModel] : []),
+      ...(isLegacyOrInvalidModel ? [] : [configuredModel]),
+      'gemini-2.5-flash-lite',
       'gemini-2.5-flash',
+      'gemini-flash-lite-latest',
     ];
     const uniqueCandidateModels = [...new Set(candidateModels)];
 
@@ -1844,9 +1976,10 @@ DYNAMIC DATE RESOLUTION:
           contents: conversationContents,
           tools,
           apiKey: settings.gemini_api_key || process.env.GEMINI_API_KEY,
-          timeoutMs: 10000,
+          timeoutMs: 8000,
         });
         activeModelName = mName;
+        cachedWorkingGeminiModel = mName;
         console.log(`⚡ [Gemini Success] Model ${mName} responded in ${Date.now() - tModelStart}ms (Overall: ${Date.now() - t0}ms)`);
         break;
       } catch (modelErr) {
@@ -2091,49 +2224,52 @@ DYNAMIC DATE RESOLUTION:
     // ── 1. Dispatch WhatsApp Message to Patient IMMEDIATELY (Priority 1) ──
     const tDispatch = Date.now();
     try {
-      await sendWhatsAppMessage(phone, finalText);
-      console.log(`⚡ [LATENCY LOG] End-to-End: ${Date.now() - t0}ms | Model: ${activeModelName || 'fast-fallback'} | WhatsApp Dispatch API: ${Date.now() - tDispatch}ms | Recipient: ${phone}`);
+      if (!options.skipWhatsAppSend) {
+        await sendWhatsAppMessage(phone, finalText, settings);
+        console.log(`⚡ [LATENCY LOG] End-to-End: ${Date.now() - t0}ms | Model: ${activeModelName || 'fast-fallback'} | WhatsApp Dispatch API: ${Date.now() - tDispatch}ms | Recipient: ${phone}`);
+      }
     } catch (metaErr) {
       console.error('[processWithGemini] Meta WhatsApp dispatch failed:', metaErr?.response?.data || metaErr.message);
     }
 
-    // ── 2. Save to Supabase and emit socket event asynchronously in background ──
-    (async () => {
-      try {
-        await supabase.from('chat_messages').insert({
-          conversation_id: conversationId,
-          role: 'assistant',
-          content: finalText,
-          message_type: 'text',
-          created_at: new Date().toISOString(),
-        });
-      } catch (dbSaveErr) {
-        console.warn('[processWithGemini Background] Failed to save assistant message:', dbSaveErr.message);
-      }
-
-      try {
-        io.to(conversationId).emit('new_message', {
-          conversation_id: conversationId,
-          role: 'assistant',
-          content: finalText,
-          message_type: 'text',
-          created_at: new Date().toISOString(),
-        });
-      } catch {}
-    })().catch(console.warn);
+    // ── 2. Save logs & update conversation concurrently in background (non-blocking) ──
+    persistTurnInBackground(finalText);
 
     return finalText;
   } catch (err) {
     console.error('💥 [processWithGemini] Error / Timeout:', err.message);
-    const settings = await getClinicSettings().catch(() => ({}));
+    const settings = options.settings || (await getClinicSettings().catch(() => ({})));
     const state = conversationStateMap.get(conversationId) || {};
     const fallbackMessage = getContextAwareFallback(state, settings);
 
     try {
-      await sendWhatsAppMessage(phone, fallbackMessage);
-      console.log(`⚡ [Fallback Dispatched] Context-aware fallback sent in ${state.language || 'en'}: "${fallbackMessage}"`);
+      if (!options.skipWhatsAppSend) {
+        await sendWhatsAppMessage(phone, fallbackMessage, settings);
+        console.log(`⚡ [Fallback Dispatched] Context-aware fallback sent in ${state.language || 'en'}: "${fallbackMessage}"`);
+      }
     } catch (fallbackErr) {
       console.error('[Fallback Send Error]:', fallbackErr.message);
+    }
+
+    if (!options.skipDbSave) {
+      const nowIso = new Date().toISOString();
+      const assistantMsgRecord = {
+        conversation_id: conversationId,
+        role: 'assistant',
+        content: fallbackMessage,
+        message_type: 'text',
+        created_at: new Date(Date.now() + 20).toISOString(),
+      };
+      try {
+        io.to(conversationId).emit('new_message', assistantMsgRecord);
+      } catch {}
+      const rows = options.userMessageRecord
+        ? [options.userMessageRecord, assistantMsgRecord]
+        : [assistantMsgRecord];
+      Promise.allSettled([
+        supabase.from('chat_messages').insert(rows),
+        supabase.from('conversations').update({ last_message: fallbackMessage, last_message_at: nowIso }).eq('id', conversationId),
+      ]).catch(() => {});
     }
     return fallbackMessage;
   }
@@ -2355,39 +2491,29 @@ app.post(['/webhook', '/api/webhook'], async (req, res) => {
       return;
     }
 
-    // Layer 2: Persistent Supabase check (survives server restarts and dyno recycling)
-    const alreadyProcessedInDb = await isMessageAlreadyInDb(message_id);
+    // Layer 2: Parallel initial DB checks (dedup + cached 60s settings/KB + conversation thread)
+    const [alreadyProcessedInDb, settings, existingConvRes] = await Promise.all([
+      isMessageAlreadyInDb(message_id),
+      getClinicSettings(),
+      Promise.resolve(
+        supabase
+          .from('conversations')
+          .select('*')
+          .or(`phone_number.eq.${from},phone_number.eq.+${from}`)
+          .order('created_at', { ascending: true })
+          .limit(1)
+          .maybeSingle()
+      ).catch(() => ({ data: null })),
+    ]);
+
     if (alreadyProcessedInDb) {
       console.log(`⏩ [Webhook Dedup] DB dropped already-processed message: ${message_id}`);
       return;
     }
 
-    // Immediately record in Supabase so any concurrent retries are locked out
+    // Immediately record in Supabase + mark as read on WhatsApp (both async, non-blocking)
     markMessageProcessedInDb(message_id);
-
-    // Mark message as read on WhatsApp (fire & forget, non-blocking)
-    (async () => {
-      try {
-        const phoneId = await getMetaPhoneNumberId();
-        const token = await getMetaAccessToken();
-        if (phoneId && token) {
-          await axios.post(
-            `${META_GRAPH_URL}/${phoneId}/messages`,
-            {
-              messaging_product: 'whatsapp',
-              status: 'read',
-              message_id,
-            },
-            {
-              headers: {
-                Authorization: `Bearer ${token}`,
-                'Content-Type': 'application/json',
-              },
-            }
-          );
-        }
-      } catch {}
-    })().catch(() => {});
+    markWhatsAppMessageAsRead(message_id, settings);
 
     // ── Extract message body ───────────────────────────────────────────────
     let messageText = '';
@@ -2401,9 +2527,10 @@ app.post(['/webhook', '/api/webhook'], async (req, res) => {
       const mediaId = rawMessage.image?.id;
       messageText = rawMessage.image?.caption || '';
       try {
-        const token = await getMetaAccessToken();
-        const mediaRes = await axios.get(`${META_GRAPH_URL}/${mediaId}`, {
+        const token = settings.meta_access_token || (await getMetaAccessToken());
+        const mediaRes = await fastHttp.get(`${META_GRAPH_URL}/${mediaId}`, {
           headers: { Authorization: `Bearer ${token}` },
+          timeout: 6000,
         });
         imageUrl = mediaRes.data.url;
       } catch (err) {
@@ -2419,86 +2546,14 @@ app.post(['/webhook', '/api/webhook'], async (req, res) => {
 
     console.log(`📝 [Webhook Message Content]: "${messageText}"`);
 
-    // ── FAST PATH 1: Strict English-Only Greeting (Sub-200ms, No Gemini Call) ──
-    if (type === 'text' && isBasicGreeting(messageText)) {
-      const fastGreeting = "Hello! Welcome to Dr. Sharma's Dental Clinic 👋 How can I help you today?";
-      const tDispatch0 = Date.now();
-      try {
-        await sendWhatsAppMessage(from, fastGreeting);
-        console.log(`⚡ [FAST PATH GREETING] Dispatched in ${Date.now() - t0}ms (WhatsApp API: ${Date.now() - tDispatch0}ms) to ${from}`);
-      } catch (sendErr) {
-        console.error('❌ [Fast-Path Greeting Error]:', sendErr?.response?.data || sendErr.message);
-      }
-
-      // Background tracking to DB and Socket (Non-blocking)
-      (async () => {
-        try {
-          const conv = await getOrCreateConversation(from, contactName, fastGreeting, true);
-          const convId = conv?.id;
-
-          if (convId) {
-            let state = conversationStateMap.get(convId) || conversationStateMap.get(from);
-            if (!state) {
-              state = {
-                patient_name: contactName || null,
-                patient_phone: from,
-                visit_type: null,
-                dental_issue: null,
-                date: null,
-                time_slot: null,
-                language: null,
-                last_updated: Date.now(),
-              };
-              conversationStateMap.set(convId, state);
-            }
-
-            await supabase.from('chat_messages').insert([
-              {
-                conversation_id: convId,
-                role: 'user',
-                content: messageText,
-                message_type: type,
-                whatsapp_message_id: message_id,
-                created_at: new Date().toISOString(),
-              },
-              {
-                conversation_id: convId,
-                role: 'assistant',
-                content: fastGreeting,
-                message_type: 'text',
-                created_at: new Date(Date.now() + 50).toISOString(),
-              },
-            ]);
-
-            io.to(convId).emit('new_message', {
-              conversation_id: convId,
-              role: 'user',
-              content: messageText,
-              message_type: type,
-              created_at: new Date().toISOString(),
-            });
-            io.to(convId).emit('new_message', {
-              conversation_id: convId,
-              role: 'assistant',
-              content: fastGreeting,
-              message_type: 'text',
-              created_at: new Date().toISOString(),
-            });
-          }
-        } catch (dbErr) {
-          console.warn('[Fast Path DB Tracking Warning]:', dbErr.message);
-        }
-      })().catch(console.warn);
-
-      return;
+    // Resolve single unified conversation row (only hit DB if brand-new patient)
+    let conv = existingConvRes?.data || null;
+    if (!conv) {
+      conv = await getOrCreateConversation(from, contactName, messageText, true);
     }
-
-    // ── 2. NON-GREETING or SUBSEQUENT MESSAGES: Contextual Gemini Flow ──
-    const conv = await getOrCreateConversation(from, contactName, messageText, true);
     const conversationId = conv?.id || `temp-${from}`;
 
-    // Save incoming user message in background
-    Promise.resolve(supabase.from('chat_messages').insert({
+    const userMsgRecord = {
       conversation_id: conversationId,
       role: 'user',
       content: messageText,
@@ -2506,26 +2561,73 @@ app.post(['/webhook', '/api/webhook'], async (req, res) => {
       media_url: imageUrl,
       whatsapp_message_id: message_id,
       created_at: new Date().toISOString(),
-    })).catch(() => {});
+    };
 
-    io.to(conversationId).emit('new_message', {
-      conversation_id: conversationId,
-      role: 'user',
-      content: messageText,
-      message_type: type,
-      media_url: imageUrl,
-      created_at: new Date().toISOString(),
-    });
+    // Emit live incoming message to dashboard immediately (0ms)
+    io.to(conversationId).emit('new_message', userMsgRecord);
 
-    // Check AI mode
+    // Check AI mode guardrail
     if (conv && conv.ai_mode === false) {
-      console.log(`👤 [Webhook] Human mode active for conversation ${conversationId}. No AI response.`);
+      console.log(`👤 [Webhook] Human mode active for conversation ${conversationId}. Saving log only.`);
+      Promise.allSettled([
+        supabase.from('chat_messages').insert(userMsgRecord),
+        supabase
+          .from('conversations')
+          .update({
+            phone_number: from,
+            last_message: messageText,
+            last_message_at: new Date().toISOString(),
+            unread_count: (conv.unread_count || 0) + 1,
+          })
+          .eq('id', conversationId),
+      ]).catch(() => {});
       return;
     }
 
-    // Process with Gemini AI
+    // ── FAST PATH 1: Strict English-Only Greeting (Sub-200ms, No Gemini Call) ──
+    if (type === 'text' && isBasicGreeting(messageText)) {
+      const fastGreeting = "Hello! Welcome to Dr. Sharma's Dental Clinic 👋 How can I help you today?";
+      const tDispatch0 = Date.now();
+      try {
+        await sendWhatsAppMessage(from, fastGreeting, settings);
+        console.log(`⚡ [FAST PATH GREETING] Dispatched in ${Date.now() - t0}ms (WhatsApp API: ${Date.now() - tDispatch0}ms) to ${from}`);
+      } catch (sendErr) {
+        console.error('❌ [Fast-Path Greeting Error]:', sendErr?.response?.data || sendErr.message);
+      }
+
+      // Persist both messages + update conversation concurrently in background
+      if (conv?.id) {
+        const assistantMsgRecord = {
+          conversation_id: conv.id,
+          role: 'assistant',
+          content: fastGreeting,
+          message_type: 'text',
+          created_at: new Date(Date.now() + 20).toISOString(),
+        };
+        io.to(conv.id).emit('new_message', assistantMsgRecord);
+        Promise.allSettled([
+          supabase.from('chat_messages').insert([userMsgRecord, assistantMsgRecord]),
+          supabase
+            .from('conversations')
+            .update({
+              phone_number: from,
+              last_message: fastGreeting,
+              last_message_at: new Date().toISOString(),
+            })
+            .eq('id', conv.id),
+        ]).catch(() => {});
+      }
+      return;
+    }
+
+    // ── 2. NON-GREETING or SUBSEQUENT MESSAGES: Optimized Parallel Gemini Flow ──
     console.log(`🤖 [Webhook] Triggering Gemini for conversation ${conversationId} (elapsed: ${Date.now() - t0}ms)...`);
-    await processWithGemini(conversationId, from, messageText, type, imageUrl, t0);
+    await processWithGemini(conversationId, from, messageText, type, imageUrl, t0, {
+      settings,
+      conv,
+      contactName,
+      userMessageRecord,
+    });
   } catch (err) {
     console.error('❌ [Webhook POST Error]:', err.message, err.stack);
     // Unsolicited auto-messaging removed: NEVER send automated emergency messages to users on error
@@ -3034,7 +3136,9 @@ app.post('/api/chat/simulate', async (req, res) => {
     await supabase.from('chat_messages').insert(userMsgRecord);
     io.to(conv.id).emit('new_message', userMsgRecord);
 
-    const reply = await processWithGemini(conv.id, phone, message.trim(), 'text', null);
+    const reply = await processWithGemini(conv.id, phone, message.trim(), 'text', null, Date.now(), {
+      skipDbSave: true,
+    });
 
     const aiMsgRecord = {
       conversation_id: conv.id,
@@ -3121,6 +3225,8 @@ app.post('/api/upload-kb', upload.single('file'), async (req, res) => {
 
     if (kbErr) {
       console.warn('[upload-kb] DB insert error:', kbErr.message);
+    } else {
+      invalidateClinicSettingsCache();
     }
 
     // Clean up temp file if uploaded to storage
