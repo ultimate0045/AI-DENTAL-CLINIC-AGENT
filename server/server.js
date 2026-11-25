@@ -1526,7 +1526,7 @@ function getContextAwareFallback(state, settings) {
 // ─── Direct Gemini REST API Caller (Low-Latency Keep-Alive + No Thinking) ────
 let cachedWorkingGeminiModel = null;
 
-async function callGeminiRestApi({ model, systemPrompt, contents, tools, apiKey, timeoutMs = 8000 }) {
+async function callGeminiRestApi({ model, systemPrompt, contents, tools, apiKey, timeoutMs = 6000 }) {
   const cleanKey = (apiKey || process.env.GEMINI_API_KEY || '').trim();
   if (!cleanKey) {
     throw new Error('GEMINI_API_KEY is missing in clinic_settings and environment variables');
@@ -1553,28 +1553,32 @@ async function callGeminiRestApi({ model, systemPrompt, contents, tools, apiKey,
     payload.tools = tools;
   }
 
-  try {
-    const response = await fastHttp.post(url, payload, {
-      headers: { 'Content-Type': 'application/json' },
-      timeout: timeoutMs,
-    });
-    if (response.status !== 200 || !response.data?.candidates?.length) {
-      throw new Error(`Unexpected Gemini HTTP ${response.status}: ${JSON.stringify(response.data || {})}`);
+  const doPost = async (body) => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await fastHttp.post(url, body, {
+        headers: { 'Content-Type': 'application/json' },
+        timeout: timeoutMs,
+        signal: controller.signal,
+      });
+      if (response.status !== 200 || !response.data?.candidates?.length) {
+        throw new Error(`Unexpected Gemini HTTP ${response.status}: ${JSON.stringify(response.data || {})}`);
+      }
+      return response.data;
+    } finally {
+      clearTimeout(timer);
     }
-    return response.data;
+  };
+
+  try {
+    return await doPost(payload);
   } catch (err) {
     // If ANY 400 error occurred while thinkingConfig was set, retry cleanly without thinkingConfig
     if (supportsThinkingConfig && err?.response?.status === 400) {
       console.warn(`[callGeminiRestApi] 400 with thinkingConfig on ${model}, retrying without thinkingConfig...`);
       delete payload.generationConfig.thinkingConfig;
-      const retryRes = await fastHttp.post(url, payload, {
-        headers: { 'Content-Type': 'application/json' },
-        timeout: timeoutMs,
-      });
-      if (retryRes.status !== 200 || !retryRes.data?.candidates?.length) {
-        throw new Error(`Unexpected Gemini retry HTTP ${retryRes.status}: ${JSON.stringify(retryRes.data || {})}`);
-      }
-      return retryRes.data;
+      return await doPost(payload);
     }
     throw err;
   }
@@ -1582,6 +1586,7 @@ async function callGeminiRestApi({ model, systemPrompt, contents, tools, apiKey,
 
 // ─── Gemini AI Processing ─────────────────────────────────────────────────────
 async function processWithGemini(conversationId, phone, messageText, messageType, imageUrl, t0 = Date.now(), options = {}) {
+  console.log(`🔵 [INSIDE_GEMINI_FN] convId=${conversationId} phone=${phone} type=${messageType} msg="${String(messageText || '').slice(0, 60)}"`);
   try {
     const dateCtx = getRealtimeDateContext();
 
@@ -1605,34 +1610,49 @@ async function processWithGemini(conversationId, phone, messageText, messageType
 
     const isTempConv = !conversationId || String(conversationId).startsWith('temp-');
 
-    // Parallelize cached settings + recent 8 chat_messages + active appointment lookup in ONE Promise.all
+    // Parallelize cached settings + recent 8 chat_messages + active appointment lookup in ONE Promise.all (with 3.5s safety timeout)
     const [settings, historyRes, apptRes] = await Promise.all([
       options.settings ? Promise.resolve(options.settings) : getClinicSettings(),
       options.historyRows
         ? Promise.resolve({ data: options.historyRows })
         : isTempConv
           ? Promise.resolve({ data: [] })
-          : Promise.resolve(
-              supabase
-                .from('chat_messages')
-                .select('role, content')
-                .eq('conversation_id', conversationId)
-                .order('created_at', { ascending: false })
-                .limit(8)
-            ).catch(() => ({ data: [] })),
+          : withTimeout(
+              Promise.resolve(
+                supabase
+                  .from('chat_messages')
+                  .select('role, content')
+                  .eq('conversation_id', conversationId)
+                  .order('created_at', { ascending: false })
+                  .limit(8)
+              ),
+              3500,
+              'chat_messages history timeout'
+            ).catch((e) => {
+              console.warn('[GEMINI_HISTORY_WARN]', e?.message);
+              return { data: [] };
+            }),
       !state.is_booked && phone
-        ? Promise.resolve(
-            supabase
-              .from('appointments')
-              .select('booking_id, patient_name, patient_phone, dental_issue, appointment_date, time_slot')
-              .eq('patient_phone', phone)
-              .neq('status', 'Cancelled')
-              .order('created_at', { ascending: false })
-              .limit(1)
-              .maybeSingle()
-          ).catch(() => ({ data: null }))
+        ? withTimeout(
+            Promise.resolve(
+              supabase
+                .from('appointments')
+                .select('booking_id, patient_name, patient_phone, dental_issue, appointment_date, time_slot')
+                .eq('patient_phone', phone)
+                .neq('status', 'Cancelled')
+                .order('created_at', { ascending: false })
+                .limit(1)
+                .maybeSingle()
+            ),
+            3500,
+            'appointments lookup timeout'
+          ).catch((e) => {
+            console.warn('[GEMINI_APPT_WARN]', e?.message);
+            return { data: null };
+          })
         : Promise.resolve({ data: null }),
     ]);
+    console.log(`🟢 [GEMINI_CONTEXT_OK] historyCount=${historyRes?.data?.length || 0} hasSettings=${Boolean(settings)} elapsed=${Date.now() - t0}ms`);
 
     const existingAppt = apptRes?.data;
     if (existingAppt && existingAppt.booking_id) {
@@ -2033,9 +2053,13 @@ DYNAMIC DATE RESOLUTION:
     let activeModelName = '';
     let activeApiKey = candidateKeys[0];
 
-    outerLoop: for (const apiKeyCandidate of candidateKeys) {
+    console.log(`🚀 [GEMINI_CALL_START] keys=${candidateKeys.length} models=${uniqueCandidateModels.join(',')} historyTurns=${history.length} elapsed=${Date.now() - t0}ms`);
+
+    outerLoop: for (let kIdx = 0; kIdx < candidateKeys.length; kIdx++) {
+      const apiKeyCandidate = candidateKeys[kIdx];
       for (const mName of uniqueCandidateModels) {
         const tModelStart = Date.now();
+        console.log(`📡 [GEMINI_TRY] keyIdx=${kIdx} model=${mName}`);
         try {
           geminiData = await callGeminiRestApi({
             model: mName,
@@ -2043,7 +2067,7 @@ DYNAMIC DATE RESOLUTION:
             contents: conversationContents,
             tools,
             apiKey: apiKeyCandidate,
-            timeoutMs: 7000,
+            timeoutMs: 6000,
           });
           activeModelName = mName;
           activeApiKey = apiKeyCandidate;
@@ -2051,11 +2075,11 @@ DYNAMIC DATE RESOLUTION:
           console.log(`⚡ [STEP 3: GEMINI_OK] Model ${mName} responded in ${Date.now() - tModelStart}ms (Overall: ${Date.now() - t0}ms)`);
           break outerLoop;
         } catch (modelErr) {
-          const status = modelErr?.response?.status || 'ERR';
+          const status = modelErr?.response?.status || (modelErr?.code === 'ERR_CANCELED' ? 'TIMEOUT' : 'ERR');
           const errDetail = modelErr?.response?.data?.error?.message || modelErr.message;
           console.warn(`⚠️ [Gemini Fallback] Model ${mName} failed (${status}) in ${Date.now() - tModelStart}ms: ${errDetail}`);
           // If key is rejected (400/401/403/429) and we have another key (e.g. process.env.GEMINI_API_KEY), switch keys immediately
-          if ([400, 401, 403, 429].includes(status) && candidateKeys.length > 1 && apiKeyCandidate !== candidateKeys[candidateKeys.length - 1]) {
+          if ([400, 401, 403, 429].includes(status) && kIdx < candidateKeys.length - 1) {
             console.warn(`🔑 [Gemini Key Fallback] Primary key failed with HTTP ${status}, retrying with fallback env GEMINI_API_KEY...`);
             break;
           }
@@ -2634,8 +2658,12 @@ app.post(['/webhook', '/api/webhook'], async (req, res) => {
       conv = await getOrCreateConversation(from, contactName, messageText, true);
     }
     const conversationId = conv?.id || `temp-${from}`;
+    const isGreetingMsg = type === 'text' && isBasicGreeting(messageText);
     console.log(
       `✅ [STEP 2: DB_OK] convId=${conversationId} | ai_mode=${conv?.ai_mode !== false} | hasToken=${Boolean(settings?.meta_access_token)} | hasPhoneId=${Boolean(settings?.meta_phone_number_id)} | hasGeminiKey=${Boolean(settings?.gemini_api_key)} | elapsed=${Date.now() - t0}ms`
+    );
+    console.log(
+      `🔀 [BRANCH_CHECK] type=${type} isGreeting=${isGreetingMsg} aiMode=${conv?.ai_mode} msg="${String(messageText).slice(0, 60)}"`
     );
 
     const userMsgRecord = {
@@ -2670,7 +2698,7 @@ app.post(['/webhook', '/api/webhook'], async (req, res) => {
     }
 
     // ── FAST PATH 1: Strict English-Only Greeting (Sub-200ms, No Gemini Call) ──
-    if (type === 'text' && isBasicGreeting(messageText)) {
+    if (isGreetingMsg) {
       const fastGreeting = "Hello! Welcome to Dr. Sharma's Dental Clinic 👋 How can I help you today?";
       const tDispatch0 = Date.now();
       try {
@@ -2707,7 +2735,7 @@ app.post(['/webhook', '/api/webhook'], async (req, res) => {
     }
 
     // ── 2. NON-GREETING or SUBSEQUENT MESSAGES: Optimized Parallel Gemini Flow ──
-    console.log(`🤖 [Webhook] Triggering Gemini for conversation ${conversationId} (elapsed: ${Date.now() - t0}ms)...`);
+    console.log(`🤖 [CALLING_GEMINI_FN] convId=${conversationId} from=${from} (elapsed: ${Date.now() - t0}ms)...`);
     await processWithGemini(conversationId, from, messageText, type, imageUrl, t0, {
       settings,
       conv,
